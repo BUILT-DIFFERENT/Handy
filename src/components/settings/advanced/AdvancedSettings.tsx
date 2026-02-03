@@ -17,6 +17,7 @@ import { RecordingRetentionPeriodSelector } from "../RecordingRetentionPeriod";
 import { ExperimentalToggle } from "../ExperimentalToggle";
 import { useSettings } from "../../../hooks/useSettings";
 import { KeyboardImplementationSelector } from "../debug/KeyboardImplementationSelector";
+import { CloudTranscriptionSettings } from "../cloud-transcription/CloudTranscriptionSettings";
 
 export const AdvancedSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -59,13 +60,16 @@ export const AdvancedSettings: React.FC = () => {
       </SettingsGroup>
 
       {experimentalEnabled && (
-        <SettingsGroup title={t("settings.advanced.groups.experimental")}>
-          <PostProcessingToggle descriptionMode="tooltip" grouped={true} />
-          <KeyboardImplementationSelector
-            descriptionMode="tooltip"
-            grouped={true}
-          />
-        </SettingsGroup>
+        <>
+          <SettingsGroup title={t("settings.advanced.groups.experimental")}>
+            <PostProcessingToggle descriptionMode="tooltip" grouped={true} />
+            <KeyboardImplementationSelector
+              descriptionMode="tooltip"
+              grouped={true}
+            />
+          </SettingsGroup>
+          <CloudTranscriptionSettings />
+        </>
       )}
     </div>
   );

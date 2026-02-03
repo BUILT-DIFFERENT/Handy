@@ -103,6 +103,17 @@ pub struct PostProcessProvider {
     pub models_endpoint: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct TranscriptionProvider {
+    pub id: String,
+    pub label: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub allow_base_url_edit: bool,
+    #[serde(default)]
+    pub models_endpoint: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
 #[serde(rename_all = "lowercase")]
 pub enum OverlayPosition {
@@ -305,6 +316,20 @@ pub struct AppSettings {
     pub post_process_prompts: Vec<LLMPrompt>,
     #[serde(default)]
     pub post_process_selected_prompt_id: Option<String>,
+    #[serde(default = "default_cloud_transcription_enabled")]
+    pub cloud_transcription_enabled: bool,
+    #[serde(default = "default_transcription_provider_id")]
+    pub transcription_provider_id: String,
+    #[serde(default = "default_transcription_providers")]
+    pub transcription_providers: Vec<TranscriptionProvider>,
+    #[serde(default = "default_transcription_api_keys")]
+    pub transcription_api_keys: HashMap<String, String>,
+    #[serde(default = "default_transcription_models")]
+    pub transcription_models: HashMap<String, String>,
+    #[serde(default = "default_cloud_transcription_fallback_enabled")]
+    pub cloud_transcription_fallback_enabled: bool,
+    #[serde(default = "default_cloud_transcription_fallback_model_id")]
+    pub cloud_transcription_fallback_model_id: String,
     #[serde(default)]
     pub mute_while_recording: bool,
     #[serde(default)]
@@ -390,6 +415,18 @@ fn default_post_process_enabled() -> bool {
     false
 }
 
+fn default_cloud_transcription_enabled() -> bool {
+    false
+}
+
+fn default_cloud_transcription_fallback_enabled() -> bool {
+    true
+}
+
+fn default_cloud_transcription_fallback_model_id() -> String {
+    default_model()
+}
+
 fn default_app_language() -> String {
     tauri_plugin_os::locale()
         .and_then(|l| l.split(['-', '_']).next().map(String::from))
@@ -398,6 +435,10 @@ fn default_app_language() -> String {
 
 fn default_post_process_provider_id() -> String {
     "openai".to_string()
+}
+
+fn default_transcription_provider_id() -> String {
+    "groq".to_string()
 }
 
 fn default_post_process_providers() -> Vec<PostProcessProvider> {
@@ -466,9 +507,37 @@ fn default_post_process_providers() -> Vec<PostProcessProvider> {
     providers
 }
 
+fn default_transcription_providers() -> Vec<TranscriptionProvider> {
+    let mut providers = vec![TranscriptionProvider {
+        id: "groq".to_string(),
+        label: "Groq".to_string(),
+        base_url: "https://api.groq.com/openai/v1".to_string(),
+        allow_base_url_edit: false,
+        models_endpoint: Some("/models".to_string()),
+    }];
+
+    providers.push(TranscriptionProvider {
+        id: "custom".to_string(),
+        label: "Custom".to_string(),
+        base_url: "http://localhost:11434/v1".to_string(),
+        allow_base_url_edit: true,
+        models_endpoint: Some("/models".to_string()),
+    });
+
+    providers
+}
+
 fn default_post_process_api_keys() -> HashMap<String, String> {
     let mut map = HashMap::new();
     for provider in default_post_process_providers() {
+        map.insert(provider.id, String::new());
+    }
+    map
+}
+
+fn default_transcription_api_keys() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for provider in default_transcription_providers() {
         map.insert(provider.id, String::new());
     }
     map
@@ -488,6 +557,14 @@ fn default_post_process_models() -> HashMap<String, String> {
             provider.id.clone(),
             default_model_for_provider(&provider.id),
         );
+    }
+    map
+}
+
+fn default_transcription_models() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for provider in default_transcription_providers() {
+        map.insert(provider.id.clone(), String::new());
     }
     map
 }
@@ -533,6 +610,36 @@ fn ensure_post_process_defaults(settings: &mut AppSettings) -> bool {
                     .insert(provider.id.clone(), default_model);
                 changed = true;
             }
+        }
+    }
+
+    changed
+}
+
+fn ensure_transcription_defaults(settings: &mut AppSettings) -> bool {
+    let mut changed = false;
+    for provider in default_transcription_providers() {
+        if settings
+            .transcription_providers
+            .iter()
+            .all(|existing| existing.id != provider.id)
+        {
+            settings.transcription_providers.push(provider.clone());
+            changed = true;
+        }
+
+        if !settings.transcription_api_keys.contains_key(&provider.id) {
+            settings
+                .transcription_api_keys
+                .insert(provider.id.clone(), String::new());
+            changed = true;
+        }
+
+        if !settings.transcription_models.contains_key(&provider.id) {
+            settings
+                .transcription_models
+                .insert(provider.id.clone(), String::new());
+            changed = true;
         }
     }
 
@@ -606,6 +713,13 @@ pub fn get_default_settings() -> AppSettings {
         post_process_models: default_post_process_models(),
         post_process_prompts: default_post_process_prompts(),
         post_process_selected_prompt_id: None,
+        cloud_transcription_enabled: default_cloud_transcription_enabled(),
+        transcription_provider_id: default_transcription_provider_id(),
+        transcription_providers: default_transcription_providers(),
+        transcription_api_keys: default_transcription_api_keys(),
+        transcription_models: default_transcription_models(),
+        cloud_transcription_fallback_enabled: default_cloud_transcription_fallback_enabled(),
+        cloud_transcription_fallback_model_id: default_cloud_transcription_fallback_model_id(),
         mute_while_recording: false,
         append_trailing_space: false,
         app_language: default_app_language(),
@@ -633,6 +747,27 @@ impl AppSettings {
         provider_id: &str,
     ) -> Option<&mut PostProcessProvider> {
         self.post_process_providers
+            .iter_mut()
+            .find(|provider| provider.id == provider_id)
+    }
+
+    pub fn active_transcription_provider(&self) -> Option<&TranscriptionProvider> {
+        self.transcription_providers
+            .iter()
+            .find(|provider| provider.id == self.transcription_provider_id)
+    }
+
+    pub fn transcription_provider(&self, provider_id: &str) -> Option<&TranscriptionProvider> {
+        self.transcription_providers
+            .iter()
+            .find(|provider| provider.id == provider_id)
+    }
+
+    pub fn transcription_provider_mut(
+        &mut self,
+        provider_id: &str,
+    ) -> Option<&mut TranscriptionProvider> {
+        self.transcription_providers
             .iter_mut()
             .find(|provider| provider.id == provider_id)
     }
@@ -682,7 +817,14 @@ pub fn load_or_create_app_settings(app: &AppHandle) -> AppSettings {
         default_settings
     };
 
+    let mut updated = false;
     if ensure_post_process_defaults(&mut settings) {
+        updated = true;
+    }
+    if ensure_transcription_defaults(&mut settings) {
+        updated = true;
+    }
+    if updated {
         store.set("settings", serde_json::to_value(&settings).unwrap());
     }
 
@@ -706,7 +848,14 @@ pub fn get_settings(app: &AppHandle) -> AppSettings {
         default_settings
     };
 
+    let mut updated = false;
     if ensure_post_process_defaults(&mut settings) {
+        updated = true;
+    }
+    if ensure_transcription_defaults(&mut settings) {
+        updated = true;
+    }
+    if updated {
         store.set("settings", serde_json::to_value(&settings).unwrap());
     }
 

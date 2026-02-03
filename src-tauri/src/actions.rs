@@ -1,5 +1,6 @@
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use crate::apple_intelligence;
+use crate::audio_toolkit::{apply_custom_words, filter_transcription_output};
 use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, SoundType};
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::history::HistoryManager;
@@ -169,6 +170,168 @@ async fn maybe_post_process_transcription(
     }
 }
 
+const CLOUD_TRANSCRIPTION_MAX_SECONDS: f32 = 300.0;
+const CLOUD_TRANSCRIPTION_SAMPLE_RATE: f32 = 16000.0;
+
+fn normalize_cloud_language(selected_language: &str) -> Option<String> {
+    if selected_language == "auto" {
+        return None;
+    }
+
+    if selected_language == "zh-Hans" || selected_language == "zh-Hant" {
+        return Some("zh".to_string());
+    }
+
+    Some(selected_language.to_string())
+}
+
+fn apply_transcription_filters(settings: &AppSettings, text: &str) -> String {
+    let corrected = if !settings.custom_words.is_empty() {
+        apply_custom_words(
+            text,
+            &settings.custom_words,
+            settings.word_correction_threshold,
+        )
+    } else {
+        text.to_string()
+    };
+
+    filter_transcription_output(&corrected)
+}
+
+fn resolve_local_model_id(settings: &AppSettings, use_fallback: bool) -> Result<String, String> {
+    if use_fallback {
+        let fallback_id = settings.cloud_transcription_fallback_model_id.trim();
+        if !fallback_id.is_empty() {
+            return Ok(fallback_id.to_string());
+        }
+    }
+
+    let model_id = settings.selected_model.trim();
+    if model_id.is_empty() {
+        return Err("No local transcription model is selected.".to_string());
+    }
+
+    Ok(model_id.to_string())
+}
+
+fn transcribe_locally(
+    settings: &AppSettings,
+    transcription_manager: &TranscriptionManager,
+    samples: Vec<f32>,
+    use_fallback: bool,
+) -> Result<String, String> {
+    let model_id = resolve_local_model_id(settings, use_fallback)?;
+
+    let current_model = transcription_manager.get_current_model();
+    if current_model.as_deref() != Some(model_id.as_str()) {
+        transcription_manager
+            .load_model(&model_id)
+            .map_err(|e| format!("Failed to load local model '{}': {}", model_id, e))?;
+    }
+
+    transcription_manager
+        .transcribe(samples)
+        .map_err(|e| format!("Local transcription failed: {}", e))
+}
+
+async fn transcribe_with_cloud(
+    settings: &AppSettings,
+    samples: &[f32],
+) -> Result<String, String> {
+    let provider = match settings.active_transcription_provider().cloned() {
+        Some(provider) => provider,
+        None => {
+            return Err("Cloud transcription is enabled but no provider is selected.".to_string())
+        }
+    };
+
+    let model = settings
+        .transcription_models
+        .get(&provider.id)
+        .cloned()
+        .unwrap_or_default();
+
+    if model.trim().is_empty() {
+        return Err(format!(
+            "Cloud transcription is enabled but provider '{}' has no model configured.",
+            provider.label
+        ));
+    }
+
+    let duration_seconds = samples.len() as f32 / CLOUD_TRANSCRIPTION_SAMPLE_RATE;
+    if duration_seconds > CLOUD_TRANSCRIPTION_MAX_SECONDS {
+        return Err(format!(
+            "Cloud transcription only supports up to {} seconds (received {:.1} seconds).",
+            CLOUD_TRANSCRIPTION_MAX_SECONDS as i32,
+            duration_seconds
+        ));
+    }
+
+    let api_key = settings
+        .transcription_api_keys
+        .get(&provider.id)
+        .cloned()
+        .unwrap_or_default();
+
+    if api_key.trim().is_empty() && provider.id != "custom" {
+        return Err(format!(
+            "API key is required for {} cloud transcription.",
+            provider.label
+        ));
+    }
+
+    let language = normalize_cloud_language(&settings.selected_language);
+
+    let raw_text = crate::stt_client::transcribe_audio(
+        &provider,
+        api_key,
+        &model,
+        samples,
+        language,
+        None,
+        settings.translate_to_english,
+    )
+    .await?;
+
+    if raw_text.trim().is_empty() {
+        return Err("Cloud transcription returned an empty response.".to_string());
+    }
+
+    Ok(apply_transcription_filters(settings, &raw_text))
+}
+
+async fn transcribe_with_fallback(
+    settings: &AppSettings,
+    transcription_manager: &TranscriptionManager,
+    samples: Vec<f32>,
+) -> Result<String, String> {
+    if settings.cloud_transcription_enabled {
+        match transcribe_with_cloud(settings, &samples).await {
+            Ok(text) => return Ok(text),
+            Err(err) => {
+                if settings.cloud_transcription_fallback_enabled {
+                    debug!(
+                        "Cloud transcription failed ({}). Falling back to local model.",
+                        err
+                    );
+                    return transcribe_locally(settings, transcription_manager, samples, true)
+                        .map_err(|fallback_err| {
+                            format!(
+                                "Cloud transcription failed: {}. Local fallback failed: {}",
+                                err, fallback_err
+                            )
+                        });
+                }
+
+                return Err(err);
+            }
+        }
+    }
+
+    transcribe_locally(settings, transcription_manager, samples, false)
+}
+
 async fn maybe_convert_chinese_variant(
     settings: &AppSettings,
     transcription: &str,
@@ -219,8 +382,13 @@ impl ShortcutAction for TranscribeAction {
         debug!("TranscribeAction::start called for binding: {}", binding_id);
 
         // Load model in the background
+        let settings = get_settings(app);
         let tm = app.state::<Arc<TranscriptionManager>>();
-        tm.initiate_model_load();
+        if !settings.cloud_transcription_enabled
+            || settings.cloud_transcription_fallback_enabled
+        {
+            tm.initiate_model_load();
+        }
 
         let binding_id = binding_id.to_string();
         change_tray_icon(app, TrayIconState::Recording);
@@ -229,7 +397,6 @@ impl ShortcutAction for TranscribeAction {
         let rm = app.state::<Arc<AudioRecordingManager>>();
 
         // Get the microphone mode to determine audio feedback timing
-        let settings = get_settings(app);
         let is_always_on = settings.always_on_microphone;
         debug!("Microphone mode - always_on: {}", is_always_on);
 
@@ -323,7 +490,8 @@ impl ShortcutAction for TranscribeAction {
 
                 let transcription_time = Instant::now();
                 let samples_clone = samples.clone(); // Clone for history saving
-                match tm.transcribe(samples) {
+                let settings = get_settings(&ah);
+                match transcribe_with_fallback(&settings, &tm, samples).await {
                     Ok(transcription) => {
                         debug!(
                             "Transcription completed in {:?}: '{}'",
@@ -331,7 +499,6 @@ impl ShortcutAction for TranscribeAction {
                             transcription
                         );
                         if !transcription.is_empty() {
-                            let settings = get_settings(&ah);
                             let mut final_text = transcription.clone();
                             let mut post_processed_text: Option<String> = None;
                             let mut post_process_prompt: Option<String> = None;

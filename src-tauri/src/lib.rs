@@ -8,6 +8,7 @@ mod commands;
 mod helpers;
 mod input;
 mod llm_client;
+mod stt_client;
 mod managers;
 mod overlay;
 mod settings;
@@ -254,12 +255,20 @@ pub fn run() {
         shortcut::change_paste_method_setting,
         shortcut::change_clipboard_handling_setting,
         shortcut::change_post_process_enabled_setting,
+        shortcut::change_cloud_transcription_enabled_setting,
+        shortcut::change_cloud_transcription_fallback_enabled_setting,
+        shortcut::change_cloud_transcription_fallback_model_setting,
         shortcut::change_experimental_enabled_setting,
         shortcut::change_post_process_base_url_setting,
         shortcut::change_post_process_api_key_setting,
         shortcut::change_post_process_model_setting,
         shortcut::set_post_process_provider,
         shortcut::fetch_post_process_models,
+        shortcut::change_transcription_base_url_setting,
+        shortcut::change_transcription_api_key_setting,
+        shortcut::change_transcription_model_setting,
+        shortcut::set_transcription_provider,
+        shortcut::fetch_transcription_models,
         shortcut::add_post_process_prompt,
         shortcut::update_post_process_prompt,
         shortcut::delete_post_process_prompt,

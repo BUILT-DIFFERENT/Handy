@@ -297,6 +297,46 @@
         "createFirst": "Click 'Create New Prompt' above to create your first post-processing prompt."
       }
     },
+    "cloudTranscription": {
+      "groupTitle": "Cloud Transcription",
+      "toggle": {
+        "label": "Cloud Transcription",
+        "description": "Send audio to a cloud provider for speech-to-text."
+      },
+      "disabledNotice": "Cloud transcription is currently disabled. Enable it to configure the provider.",
+      "provider": {
+        "title": "Provider",
+        "description": "Select an OpenAI-compatible speech-to-text provider."
+      },
+      "baseUrl": {
+        "title": "Base URL",
+        "description": "API base URL for the selected provider. Only the custom provider can be edited.",
+        "placeholder": "https://api.groq.com/openai/v1"
+      },
+      "apiKey": {
+        "title": "API Key",
+        "description": "API key for the selected provider.",
+        "placeholder": "gsk_..."
+      },
+      "model": {
+        "title": "Model",
+        "description": "Choose a transcription model exposed by the selected provider.",
+        "placeholderWithOptions": "Search or select a model",
+        "placeholderNoOptions": "Type a model name",
+        "refreshModels": "Refresh models"
+      },
+      "limitsNotice": "Uploads are limited to 5 minutes per recording. Longer audio will fall back to local transcription if enabled.",
+      "fallback": {
+        "label": "Fallback to Local Model",
+        "description": "If cloud transcription fails or exceeds limits, use a local model instead."
+      },
+      "fallbackModel": {
+        "title": "Fallback Model",
+        "description": "Model used when falling back to local transcription.",
+        "placeholder": "Select a local model",
+        "emptyNotice": "No local models are downloaded yet. Download one from the model selector."
+      }
+    },
     "history": {
       "title": "History",
       "openFolder": "Open Recordings Folder",

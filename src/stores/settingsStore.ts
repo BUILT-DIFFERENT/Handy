@@ -12,6 +12,7 @@ interface SettingsStore {
   outputDevices: AudioDevice[];
   customSounds: { start: boolean; stop: boolean };
   postProcessModelOptions: Record<string, string[]>;
+  transcriptionModelOptions: Record<string, string[]>;
 
   // Actions
   initialize: () => Promise<void>;
@@ -47,6 +48,23 @@ interface SettingsStore {
   updatePostProcessModel: (providerId: string, model: string) => Promise<void>;
   fetchPostProcessModels: (providerId: string) => Promise<string[]>;
   setPostProcessModelOptions: (providerId: string, models: string[]) => void;
+  setTranscriptionProvider: (providerId: string) => Promise<void>;
+  updateTranscriptionSetting: (
+    settingType: "base_url" | "api_key" | "model",
+    providerId: string,
+    value: string,
+  ) => Promise<void>;
+  updateTranscriptionBaseUrl: (
+    providerId: string,
+    baseUrl: string,
+  ) => Promise<void>;
+  updateTranscriptionApiKey: (
+    providerId: string,
+    apiKey: string,
+  ) => Promise<void>;
+  updateTranscriptionModel: (providerId: string, model: string) => Promise<void>;
+  fetchTranscriptionModels: (providerId: string) => Promise<string[]>;
+  setTranscriptionModelOptions: (providerId: string, models: string[]) => void;
 
   // Internal state setters
   setSettings: (settings: Settings | null) => void;
@@ -119,6 +137,12 @@ const settingUpdaters: {
     commands.changePostProcessEnabledSetting(value as boolean),
   post_process_selected_prompt_id: (value) =>
     commands.setPostProcessSelectedPrompt(value as string),
+  cloud_transcription_enabled: (value) =>
+    commands.changeCloudTranscriptionEnabledSetting(value as boolean),
+  cloud_transcription_fallback_enabled: (value) =>
+    commands.changeCloudTranscriptionFallbackEnabledSetting(value as boolean),
+  cloud_transcription_fallback_model_id: (value) =>
+    commands.changeCloudTranscriptionFallbackModelSetting(value as string),
   mute_while_recording: (value) =>
     commands.changeMuteWhileRecordingSetting(value as boolean),
   append_trailing_space: (value) =>
@@ -139,6 +163,7 @@ export const useSettingsStore = create<SettingsStore>()(
     outputDevices: [],
     customSounds: { start: false, stop: false },
     postProcessModelOptions: {},
+    transcriptionModelOptions: {},
 
     // Internal setters
     setSettings: (settings) => set({ settings }),
@@ -475,6 +500,116 @@ export const useSettingsStore = create<SettingsStore>()(
       set((state) => ({
         postProcessModelOptions: {
           ...state.postProcessModelOptions,
+          [providerId]: models,
+        },
+      })),
+
+    setTranscriptionProvider: async (providerId) => {
+      const { settings, setUpdating, refreshSettings } = get();
+      const updateKey = "transcription_provider_id";
+      const previousId = settings?.transcription_provider_id ?? null;
+
+      setUpdating(updateKey, true);
+
+      if (settings) {
+        set((state) => ({
+          settings: state.settings
+            ? { ...state.settings, transcription_provider_id: providerId }
+            : null,
+        }));
+      }
+
+      try {
+        await commands.setTranscriptionProvider(providerId);
+        await refreshSettings();
+      } catch (error) {
+        console.error("Failed to set transcription provider:", error);
+        if (previousId !== null) {
+          set((state) => ({
+            settings: state.settings
+              ? { ...state.settings, transcription_provider_id: previousId }
+              : null,
+          }));
+        }
+      } finally {
+        setUpdating(updateKey, false);
+      }
+    },
+
+    updateTranscriptionSetting: async (
+      settingType: "base_url" | "api_key" | "model",
+      providerId: string,
+      value: string,
+    ) => {
+      const { setUpdating, refreshSettings } = get();
+      const updateKey = `transcription_${settingType}:${providerId}`;
+
+      setUpdating(updateKey, true);
+
+      try {
+        if (settingType === "base_url") {
+          await commands.changeTranscriptionBaseUrlSetting(providerId, value);
+        } else if (settingType === "api_key") {
+          await commands.changeTranscriptionApiKeySetting(providerId, value);
+        } else if (settingType === "model") {
+          await commands.changeTranscriptionModelSetting(providerId, value);
+        }
+        await refreshSettings();
+      } catch (error) {
+        console.error(
+          `Failed to update transcription ${settingType.replace("_", " ")}:`,
+          error,
+        );
+      } finally {
+        setUpdating(updateKey, false);
+      }
+    },
+
+    updateTranscriptionBaseUrl: async (providerId, baseUrl) => {
+      return get().updateTranscriptionSetting("base_url", providerId, baseUrl);
+    },
+
+    updateTranscriptionApiKey: async (providerId, apiKey) => {
+      set((state) => ({
+        transcriptionModelOptions: {
+          ...state.transcriptionModelOptions,
+          [providerId]: [],
+        },
+      }));
+      return get().updateTranscriptionSetting("api_key", providerId, apiKey);
+    },
+
+    updateTranscriptionModel: async (providerId, model) => {
+      return get().updateTranscriptionSetting("model", providerId, model);
+    },
+
+    fetchTranscriptionModels: async (providerId) => {
+      const updateKey = `transcription_models_fetch:${providerId}`;
+      const { setUpdating, setTranscriptionModelOptions } = get();
+
+      setUpdating(updateKey, true);
+
+      try {
+        const result = await commands.fetchTranscriptionModels(providerId);
+        if (result.status === "ok") {
+          setTranscriptionModelOptions(providerId, result.data);
+          return result.data;
+        } else {
+          console.error("Failed to fetch transcription models:", result.error);
+          return [];
+        }
+      } catch (error) {
+        console.error("Failed to fetch transcription models:", error);
+        return [];
+      } finally {
+        setUpdating(updateKey, false);
+      }
+    },
+
+    setTranscriptionModelOptions: (providerId, models) =>
+      set((state) => ({
+        transcriptionModelOptions: {
+          ...state.transcriptionModelOptions,
           [providerId]: models,
         },
       })),
