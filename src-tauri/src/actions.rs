@@ -4,7 +4,9 @@ use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, S
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::history::HistoryManager;
 use crate::managers::transcription::TranscriptionManager;
-use crate::settings::{get_settings, AppSettings, APPLE_INTELLIGENCE_PROVIDER_ID};
+use crate::settings::{
+    get_settings, AppSettings, TranscriptionBackend, APPLE_INTELLIGENCE_PROVIDER_ID,
+};
 use crate::shortcut;
 use crate::tray::{change_tray_icon, TrayIconState};
 use crate::utils::{
@@ -308,14 +310,90 @@ async fn maybe_convert_chinese_variant(
     }
 }
 
+fn should_preload_local_model(settings: &AppSettings) -> bool {
+    match settings.transcription_backend {
+        TranscriptionBackend::Local => true,
+        TranscriptionBackend::GroqCloud => settings.cloud_stt_preload_local_model,
+    }
+}
+
+fn trim_samples_for_cloud(mut samples: Vec<f32>, max_audio_seconds: u32) -> Vec<f32> {
+    let max_samples = (max_audio_seconds as usize).saturating_mul(16_000);
+    if samples.len() > max_samples {
+        let original_seconds = samples.len() as f32 / 16_000.0;
+        debug!(
+            "Cloud STT input exceeded max duration ({:.2}s > {}s). Trimming to {} samples.",
+            original_seconds, max_audio_seconds, max_samples
+        );
+        samples.truncate(max_samples);
+    }
+    samples
+}
+
+fn ensure_local_model_loaded(
+    tm: &Arc<TranscriptionManager>,
+    settings: &AppSettings,
+) -> Result<(), String> {
+    if tm.is_model_loaded() {
+        return Ok(());
+    }
+
+    let selected_model = settings.selected_model.trim();
+    if selected_model.is_empty() {
+        return Err("No local model is selected for fallback transcription.".to_string());
+    }
+
+    tm.initiate_model_load();
+    Ok(())
+}
+
+async fn transcribe_with_backend(
+    tm: &Arc<TranscriptionManager>,
+    settings: &AppSettings,
+    samples: Vec<f32>,
+) -> Result<String, String> {
+    match settings.transcription_backend {
+        TranscriptionBackend::Local => tm
+            .transcribe(samples)
+            .map_err(|e| format!("Local transcription failed: {}", e)),
+        TranscriptionBackend::GroqCloud => {
+            let trimmed_samples =
+                trim_samples_for_cloud(samples, settings.cloud_stt_max_audio_seconds);
+            match crate::cloud_stt_client::transcribe(settings, trimmed_samples.clone()).await {
+                Ok(text) => Ok(text),
+                Err(cloud_err) => {
+                    if !settings.cloud_stt_fallback_to_local {
+                        return Err(cloud_err.to_string());
+                    }
+
+                    warn!(
+                        "Cloud transcription failed ({}). Falling back to local model.",
+                        cloud_err
+                    );
+                    ensure_local_model_loaded(tm, settings)?;
+                    tm.transcribe(trimmed_samples)
+                        .map_err(|e| format!("Local fallback transcription failed: {}", e))
+                }
+            }
+        }
+    }
+}
+
 impl ShortcutAction for TranscribeAction {
     fn start(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) {
         let start_time = Instant::now();
         debug!("TranscribeAction::start called for binding: {}", binding_id);
 
-        // Load model in the background
+        let settings = get_settings(app);
+
+        // Preload local model only when local backend is active, or when cloud mode
+        // explicitly enables warm local fallback loading.
         let tm = app.state::<Arc<TranscriptionManager>>();
-        tm.initiate_model_load();
+        if should_preload_local_model(&settings) {
+            tm.initiate_model_load();
+        } else {
+            debug!("Skipping local model preload for cloud transcription backend");
+        }
 
         let binding_id = binding_id.to_string();
         change_tray_icon(app, TrayIconState::Recording);
@@ -324,7 +402,6 @@ impl ShortcutAction for TranscribeAction {
         let rm = app.state::<Arc<AudioRecordingManager>>();
 
         // Get the microphone mode to determine audio feedback timing
-        let settings = get_settings(app);
         let is_always_on = settings.always_on_microphone;
         debug!("Microphone mode - always_on: {}", is_always_on);
 
@@ -420,7 +497,8 @@ impl ShortcutAction for TranscribeAction {
 
                 let transcription_time = Instant::now();
                 let samples_clone = samples.clone(); // Clone for history saving
-                match tm.transcribe(samples) {
+                let settings = get_settings(&ah);
+                match transcribe_with_backend(&tm, &settings, samples).await {
                     Ok(transcription) => {
                         debug!(
                             "Transcription completed in {:?}: '{}'",
@@ -428,7 +506,6 @@ impl ShortcutAction for TranscribeAction {
                             transcription
                         );
                         if !transcription.is_empty() {
-                            let settings = get_settings(&ah);
                             let mut final_text = transcription.clone();
                             let mut post_processed_text: Option<String> = None;
                             let mut post_process_prompt: Option<String> = None;
@@ -512,7 +589,7 @@ impl ShortcutAction for TranscribeAction {
                         }
                     }
                     Err(err) => {
-                        debug!("Global Shortcut Transcription error: {}", err);
+                        error!("Global Shortcut Transcription error: {}", err);
                         utils::hide_recording_overlay(&ah);
                         change_tray_icon(&ah, TrayIconState::Idle);
                     }

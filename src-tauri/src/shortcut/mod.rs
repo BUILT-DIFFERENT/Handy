@@ -20,9 +20,11 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::settings::{
-    self, get_settings, AutoSubmitKey, ClipboardHandling, KeyboardImplementation, LLMPrompt,
-    OverlayPosition, PasteMethod, ShortcutBinding, SoundTheme, TypingTool,
+    self, clamp_cloud_stt_max_audio_seconds, clamp_cloud_stt_request_timeout_seconds, get_settings,
+    AutoSubmitKey, ClipboardHandling, KeyboardImplementation, LLMPrompt, OverlayPosition,
+    PasteMethod, ShortcutBinding, SoundTheme, TranscriptionBackend, TypingTool,
     APPLE_INTELLIGENCE_DEFAULT_MODEL_ID, APPLE_INTELLIGENCE_PROVIDER_ID,
+    CLOUD_STT_GROQ_PROVIDER_ID,
 };
 use crate::tray;
 
@@ -534,6 +536,24 @@ pub fn change_selected_language_setting(app: AppHandle, language: String) -> Res
 
 #[tauri::command]
 #[specta::specta]
+pub fn change_transcription_backend_setting(app: AppHandle, backend: String) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.transcription_backend = match backend.as_str() {
+        "local" => TranscriptionBackend::Local,
+        "groq_cloud" => TranscriptionBackend::GroqCloud,
+        other => {
+            return Err(format!(
+                "Invalid transcription backend '{}'. Expected 'local' or 'groq_cloud'.",
+                other
+            ));
+        }
+    };
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn change_overlay_position_setting(app: AppHandle, position: String) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
     let parsed = match position.as_str() {
@@ -848,6 +868,103 @@ fn validate_provider_exists(
     Ok(())
 }
 
+fn validate_cloud_provider_id(provider_id: &str) -> Result<(), String> {
+    if provider_id == CLOUD_STT_GROQ_PROVIDER_ID {
+        return Ok(());
+    }
+    Err(format!(
+        "Unsupported cloud STT provider '{}'. Currently supported: '{}'.",
+        provider_id, CLOUD_STT_GROQ_PROVIDER_ID
+    ))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_cloud_stt_api_key_setting(
+    app: AppHandle,
+    provider_id: String,
+    api_key: String,
+) -> Result<(), String> {
+    validate_cloud_provider_id(&provider_id)?;
+    let mut settings = settings::get_settings(&app);
+    settings.cloud_stt_api_keys.insert(provider_id, api_key);
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_cloud_stt_model_setting(
+    app: AppHandle,
+    provider_id: String,
+    model: String,
+) -> Result<(), String> {
+    validate_cloud_provider_id(&provider_id)?;
+    let mut settings = settings::get_settings(&app);
+    settings.cloud_stt_models.insert(provider_id, model);
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_cloud_stt_base_url_setting(
+    app: AppHandle,
+    provider_id: String,
+    base_url: String,
+) -> Result<(), String> {
+    validate_cloud_provider_id(&provider_id)?;
+    let mut settings = settings::get_settings(&app);
+    settings.cloud_stt_base_url.insert(provider_id, base_url);
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_cloud_stt_fallback_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.cloud_stt_fallback_to_local = enabled;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_cloud_stt_preload_local_model_setting(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.cloud_stt_preload_local_model = enabled;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_cloud_stt_max_audio_seconds_setting(
+    app: AppHandle,
+    seconds: u32,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.cloud_stt_max_audio_seconds = clamp_cloud_stt_max_audio_seconds(seconds);
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_cloud_stt_request_timeout_setting(
+    app: AppHandle,
+    seconds: u32,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.cloud_stt_request_timeout_seconds = clamp_cloud_stt_request_timeout_seconds(seconds);
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn change_post_process_api_key_setting(
@@ -1005,6 +1122,56 @@ pub async fn fetch_post_process_models(
     }
 
     crate::llm_client::fetch_models(provider, api_key).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn fetch_cloud_stt_models(
+    app: AppHandle,
+    provider_id: String,
+) -> Result<Vec<String>, String> {
+    validate_cloud_provider_id(&provider_id)?;
+    let settings = settings::get_settings(&app);
+
+    let api_key = settings
+        .cloud_stt_api_keys
+        .get(&provider_id)
+        .cloned()
+        .unwrap_or_default();
+    if api_key.trim().is_empty() {
+        return Err(format!(
+            "API key is required for {} cloud STT model listing.",
+            provider_id
+        ));
+    }
+
+    let base_url = settings
+        .cloud_stt_base_url
+        .get(&provider_id)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut models = crate::cloud_stt_client::fetch_models(
+        &base_url,
+        &api_key,
+        settings.cloud_stt_request_timeout_seconds,
+    )
+    .await
+    .map_err(|e| {
+        format!(
+            "Failed to fetch cloud STT models for provider '{}': {}",
+            provider_id, e
+        )
+    })?;
+
+    models.retain(|model| {
+        let model_lower = model.to_ascii_lowercase();
+        model_lower.contains("whisper") || model_lower.contains("distil-whisper")
+    });
+    models.sort();
+    models.dedup();
+
+    Ok(models)
 }
 
 #[tauri::command]

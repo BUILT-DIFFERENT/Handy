@@ -11,6 +11,7 @@ interface UseSettingsReturn {
   outputDevices: AudioDevice[];
   audioFeedbackEnabled: boolean;
   postProcessModelOptions: Record<string, string[]>;
+  cloudSttModelOptions: Record<string, string[]>;
 
   // Actions
   updateSetting: <K extends keyof Settings>(
@@ -41,6 +42,10 @@ interface UseSettingsReturn {
   ) => Promise<void>;
   updatePostProcessModel: (providerId: string, model: string) => Promise<void>;
   fetchPostProcessModels: (providerId: string) => Promise<string[]>;
+  updateCloudSttBaseUrl: (providerId: string, baseUrl: string) => Promise<void>;
+  updateCloudSttApiKey: (providerId: string, apiKey: string) => Promise<void>;
+  updateCloudSttModel: (providerId: string, model: string) => Promise<void>;
+  fetchCloudSttModels: (providerId: string) => Promise<string[]>;
 }
 
 export const useSettings = (): UseSettingsReturn => {
@@ -61,6 +66,7 @@ export const useSettings = (): UseSettingsReturn => {
     outputDevices: store.outputDevices,
     audioFeedbackEnabled: store.settings?.audio_feedback || false,
     postProcessModelOptions: store.postProcessModelOptions,
+    cloudSttModelOptions: store.cloudSttModelOptions,
     updateSetting: store.updateSetting,
     resetSetting: store.resetSetting,
     refreshSettings: store.refreshSettings,
@@ -74,5 +80,9 @@ export const useSettings = (): UseSettingsReturn => {
     updatePostProcessApiKey: store.updatePostProcessApiKey,
     updatePostProcessModel: store.updatePostProcessModel,
     fetchPostProcessModels: store.fetchPostProcessModels,
+    updateCloudSttBaseUrl: store.updateCloudSttBaseUrl,
+    updateCloudSttApiKey: store.updateCloudSttApiKey,
+    updateCloudSttModel: store.updateCloudSttModel,
+    fetchCloudSttModels: store.fetchCloudSttModels,
   };
 };

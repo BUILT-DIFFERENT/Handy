@@ -5,6 +5,7 @@ mod audio_feedback;
 pub mod audio_toolkit;
 pub mod cli;
 mod clipboard;
+mod cloud_stt_client;
 mod commands;
 mod helpers;
 mod input;
@@ -267,6 +268,7 @@ pub fn run(cli_args: CliArgs) {
         shortcut::change_autostart_setting,
         shortcut::change_translate_to_english_setting,
         shortcut::change_selected_language_setting,
+        shortcut::change_transcription_backend_setting,
         shortcut::change_overlay_position_setting,
         shortcut::change_debug_mode_setting,
         shortcut::change_word_correction_threshold_setting,
@@ -282,8 +284,16 @@ pub fn run(cli_args: CliArgs) {
         shortcut::change_post_process_base_url_setting,
         shortcut::change_post_process_api_key_setting,
         shortcut::change_post_process_model_setting,
+        shortcut::change_cloud_stt_api_key_setting,
+        shortcut::change_cloud_stt_model_setting,
+        shortcut::change_cloud_stt_base_url_setting,
+        shortcut::change_cloud_stt_fallback_setting,
+        shortcut::change_cloud_stt_preload_local_model_setting,
+        shortcut::change_cloud_stt_max_audio_seconds_setting,
+        shortcut::change_cloud_stt_request_timeout_setting,
         shortcut::set_post_process_provider,
         shortcut::fetch_post_process_models,
+        shortcut::fetch_cloud_stt_models,
         shortcut::add_post_process_prompt,
         shortcut::update_post_process_prompt,
         shortcut::delete_post_process_prompt,

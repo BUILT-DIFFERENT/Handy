@@ -198,6 +198,49 @@
       "pushToTalk": {
         "label": "Appuyer pour parler",
         "description": "Maintenez pour enregistrer, relâchez pour arrêter"
+      },
+      "transcriptionBackend": {
+        "title": "Transcription Backend",
+        "description": "Choose where transcription runs. Local uses your downloaded model; Groq Cloud uploads audio to Groq's API.",
+        "options": {
+          "local": "Local",
+          "groqCloud": "Groq Cloud"
+        }
+      },
+      "cloudStt": {
+        "apiKey": {
+          "title": "Groq API Key",
+          "description": "API key used for Groq cloud speech recognition.",
+          "placeholder": "gsk_..."
+        },
+        "model": {
+          "title": "Cloud Model",
+          "description": "Select a Groq speech model or type one manually.",
+          "placeholder": "Select or type model",
+          "refreshModels": "Refresh models"
+        },
+        "baseUrl": {
+          "title": "Cloud Base URL",
+          "description": "Base URL for the Groq-compatible transcription API.",
+          "placeholder": "https://api.groq.com/openai/v1"
+        },
+        "fallbackToLocal": {
+          "label": "Fallback to Local",
+          "description": "If cloud transcription fails or times out, retry with your local model."
+        },
+        "preloadLocalModel": {
+          "label": "Preload Local Model",
+          "description": "When cloud backend is active, preload the local model in the background for faster fallback."
+        },
+        "maxAudioSeconds": {
+          "title": "Max Cloud Audio Duration",
+          "description": "Longest recording sent to cloud. Longer recordings are trimmed before upload."
+        },
+        "requestTimeoutSeconds": {
+          "title": "Cloud Request Timeout",
+          "description": "How long Handy waits for the cloud transcription response before failing."
+        },
+        "secondsLabel": "{{seconds}} seconds"
       }
     },
     "sound": {

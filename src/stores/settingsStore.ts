@@ -12,6 +12,7 @@ interface SettingsStore {
   outputDevices: AudioDevice[];
   customSounds: { start: boolean; stop: boolean };
   postProcessModelOptions: Record<string, string[]>;
+  cloudSttModelOptions: Record<string, string[]>;
 
   // Actions
   initialize: () => Promise<void>;
@@ -47,6 +48,16 @@ interface SettingsStore {
   updatePostProcessModel: (providerId: string, model: string) => Promise<void>;
   fetchPostProcessModels: (providerId: string) => Promise<string[]>;
   setPostProcessModelOptions: (providerId: string, models: string[]) => void;
+  updateCloudSttSetting: (
+    settingType: "base_url" | "api_key" | "model",
+    providerId: string,
+    value: string,
+  ) => Promise<void>;
+  updateCloudSttBaseUrl: (providerId: string, baseUrl: string) => Promise<void>;
+  updateCloudSttApiKey: (providerId: string, apiKey: string) => Promise<void>;
+  updateCloudSttModel: (providerId: string, model: string) => Promise<void>;
+  fetchCloudSttModels: (providerId: string) => Promise<string[]>;
+  setCloudSttModelOptions: (providerId: string, models: string[]) => void;
 
   // Internal state setters
   setSettings: (settings: Settings | null) => void;
@@ -66,6 +77,8 @@ const DEFAULT_AUDIO_DEVICE: AudioDevice = {
   name: "Default",
   is_default: true,
 };
+
+const CLOUD_STT_DEFAULT_PROVIDER_ID = "groq";
 
 const settingUpdaters: {
   [K in keyof Settings]?: (value: Settings[K]) => Promise<unknown>;
@@ -105,6 +118,37 @@ const settingUpdaters: {
     commands.changeTranslateToEnglishSetting(value as boolean),
   selected_language: (value) =>
     commands.changeSelectedLanguageSetting(value as string),
+  transcription_backend: (value) =>
+    commands.changeTranscriptionBackendSetting(value as string),
+  cloud_stt_api_keys: (value) =>
+    Promise.all(
+      Object.entries((value ?? {}) as Record<string, string>).map(
+        ([providerId, apiKey]) =>
+          commands.changeCloudSttApiKeySetting(providerId, apiKey),
+      ),
+    ),
+  cloud_stt_models: (value) =>
+    Promise.all(
+      Object.entries((value ?? {}) as Record<string, string>).map(
+        ([providerId, model]) =>
+          commands.changeCloudSttModelSetting(providerId, model),
+      ),
+    ),
+  cloud_stt_base_url: (value) =>
+    Promise.all(
+      Object.entries((value ?? {}) as Record<string, string>).map(
+        ([providerId, baseUrl]) =>
+          commands.changeCloudSttBaseUrlSetting(providerId, baseUrl),
+      ),
+    ),
+  cloud_stt_fallback_to_local: (value) =>
+    commands.changeCloudSttFallbackSetting(value as boolean),
+  cloud_stt_preload_local_model: (value) =>
+    commands.changeCloudSttPreloadLocalModelSetting(value as boolean),
+  cloud_stt_max_audio_seconds: (value) =>
+    commands.changeCloudSttMaxAudioSecondsSetting(value as number),
+  cloud_stt_request_timeout_seconds: (value) =>
+    commands.changeCloudSttRequestTimeoutSetting(value as number),
   overlay_position: (value) =>
     commands.changeOverlayPositionSetting(value as string),
   debug_mode: (value) => commands.changeDebugModeSetting(value as boolean),
@@ -147,6 +191,7 @@ export const useSettingsStore = create<SettingsStore>()(
     outputDevices: [],
     customSounds: { start: false, stop: false },
     postProcessModelOptions: {},
+    cloudSttModelOptions: {},
 
     // Internal setters
     setSettings: (settings) => set({ settings }),
@@ -537,6 +582,156 @@ export const useSettingsStore = create<SettingsStore>()(
           [providerId]: models,
         },
       })),
+
+    updateCloudSttSetting: async (settingType, providerId, value) => {
+      const { settings, setUpdating } = get();
+      const updateKey = `cloud_stt_${settingType}:${providerId}`;
+
+      const previousApiKeys = settings?.cloud_stt_api_keys;
+      const previousModels = settings?.cloud_stt_models;
+      const previousBaseUrls = settings?.cloud_stt_base_url;
+
+      setUpdating(updateKey, true);
+
+      try {
+        if (settingType === "api_key") {
+          set((state) => ({
+            settings: state.settings
+              ? {
+                  ...state.settings,
+                  cloud_stt_api_keys: {
+                    ...(state.settings.cloud_stt_api_keys ?? {}),
+                    [providerId]: value,
+                  },
+                }
+              : null,
+          }));
+          await commands.changeCloudSttApiKeySetting(providerId, value);
+        } else if (settingType === "model") {
+          set((state) => ({
+            settings: state.settings
+              ? {
+                  ...state.settings,
+                  cloud_stt_models: {
+                    ...(state.settings.cloud_stt_models ?? {}),
+                    [providerId]: value,
+                  },
+                }
+              : null,
+          }));
+          await commands.changeCloudSttModelSetting(providerId, value);
+        } else if (settingType === "base_url") {
+          set((state) => ({
+            settings: state.settings
+              ? {
+                  ...state.settings,
+                  cloud_stt_base_url: {
+                    ...(state.settings.cloud_stt_base_url ?? {}),
+                    [providerId]: value,
+                  },
+                }
+              : null,
+          }));
+          await commands.changeCloudSttBaseUrlSetting(providerId, value);
+        }
+      } catch (error) {
+        console.error(`Failed to update cloud STT ${settingType}:`, error);
+        if (settingType === "api_key" && previousApiKeys && get().settings) {
+          set((state) => ({
+            settings: state.settings
+              ? { ...state.settings, cloud_stt_api_keys: previousApiKeys }
+              : null,
+          }));
+        }
+        if (settingType === "model" && previousModels && get().settings) {
+          set((state) => ({
+            settings: state.settings
+              ? { ...state.settings, cloud_stt_models: previousModels }
+              : null,
+          }));
+        }
+        if (settingType === "base_url" && previousBaseUrls && get().settings) {
+          set((state) => ({
+            settings: state.settings
+              ? { ...state.settings, cloud_stt_base_url: previousBaseUrls }
+              : null,
+          }));
+        }
+      } finally {
+        setUpdating(updateKey, false);
+      }
+    },
+
+    updateCloudSttBaseUrl: async (providerId, baseUrl) => {
+      const normalizedProviderId = providerId || CLOUD_STT_DEFAULT_PROVIDER_ID;
+      set((state) => ({
+        cloudSttModelOptions: {
+          ...state.cloudSttModelOptions,
+          [normalizedProviderId]: [],
+        },
+      }));
+      return get().updateCloudSttSetting(
+        "base_url",
+        normalizedProviderId,
+        baseUrl,
+      );
+    },
+
+    updateCloudSttApiKey: async (providerId, apiKey) => {
+      const normalizedProviderId = providerId || CLOUD_STT_DEFAULT_PROVIDER_ID;
+      // Clear cached models when API key changes - user should click refresh after
+      set((state) => ({
+        cloudSttModelOptions: {
+          ...state.cloudSttModelOptions,
+          [normalizedProviderId]: [],
+        },
+      }));
+      return get().updateCloudSttSetting(
+        "api_key",
+        normalizedProviderId,
+        apiKey,
+      );
+    },
+
+    updateCloudSttModel: async (providerId, model) => {
+      const normalizedProviderId = providerId || CLOUD_STT_DEFAULT_PROVIDER_ID;
+      return get().updateCloudSttSetting("model", normalizedProviderId, model);
+    },
+
+    fetchCloudSttModels: async (providerId) => {
+      const normalizedProviderId = providerId || CLOUD_STT_DEFAULT_PROVIDER_ID;
+      const updateKey = `cloud_stt_models_fetch:${normalizedProviderId}`;
+      const { setUpdating, setCloudSttModelOptions } = get();
+
+      setUpdating(updateKey, true);
+
+      try {
+        const result = await commands.fetchCloudSttModels(normalizedProviderId);
+        if (result.status === "ok") {
+          setCloudSttModelOptions(normalizedProviderId, result.data);
+          return result.data;
+        } else {
+          console.error("Failed to fetch cloud STT models:", result.error);
+          return [];
+        }
+      } catch (error) {
+        console.error("Failed to fetch cloud STT models:", error);
+        // Don't cache empty array on error - let user retry
+        return [];
+      } finally {
+        setUpdating(updateKey, false);
+      }
+    },
+
+    setCloudSttModelOptions: (providerId, models) => {
+      const normalizedProviderId = providerId || CLOUD_STT_DEFAULT_PROVIDER_ID;
+      set((state) => ({
+        cloudSttModelOptions: {
+          ...state.cloudSttModelOptions,
+          [normalizedProviderId]: models,
+        },
+      }));
+    },
 
     // Load default settings from Rust
     loadDefaultSettings: async () => {

@@ -8,6 +8,13 @@ use tauri_plugin_store::StoreExt;
 
 pub const APPLE_INTELLIGENCE_PROVIDER_ID: &str = "apple_intelligence";
 pub const APPLE_INTELLIGENCE_DEFAULT_MODEL_ID: &str = "Apple Intelligence";
+pub const CLOUD_STT_GROQ_PROVIDER_ID: &str = "groq";
+const CLOUD_STT_GROQ_DEFAULT_MODEL: &str = "whisper-large-v3";
+const CLOUD_STT_GROQ_DEFAULT_BASE_URL: &str = "https://api.groq.com/openai/v1";
+const CLOUD_STT_MAX_AUDIO_SECONDS_MIN: u32 = 1;
+const CLOUD_STT_MAX_AUDIO_SECONDS_MAX: u32 = 300;
+const CLOUD_STT_REQUEST_TIMEOUT_SECONDS_MIN: u32 = 15;
+const CLOUD_STT_REQUEST_TIMEOUT_SECONDS_MAX: u32 = 300;
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
 #[serde(rename_all = "lowercase")]
@@ -169,6 +176,13 @@ pub enum KeyboardImplementation {
     HandyKeys,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptionBackend {
+    Local,
+    GroqCloud,
+}
+
 impl Default for KeyboardImplementation {
     fn default() -> Self {
         // Default to HandyKeys only on macOS where it's well-tested.
@@ -177,6 +191,12 @@ impl Default for KeyboardImplementation {
         return KeyboardImplementation::HandyKeys;
         #[cfg(not(target_os = "macos"))]
         return KeyboardImplementation::Tauri;
+    }
+}
+
+impl Default for TranscriptionBackend {
+    fn default() -> Self {
+        TranscriptionBackend::Local
     }
 }
 
@@ -305,6 +325,24 @@ pub struct AppSettings {
     pub translate_to_english: bool,
     #[serde(default = "default_selected_language")]
     pub selected_language: String,
+    #[serde(default = "default_transcription_backend")]
+    pub transcription_backend: TranscriptionBackend,
+    #[serde(default = "default_cloud_stt_provider_id")]
+    pub cloud_stt_provider_id: String,
+    #[serde(default = "default_cloud_stt_api_keys")]
+    pub cloud_stt_api_keys: HashMap<String, String>,
+    #[serde(default = "default_cloud_stt_models")]
+    pub cloud_stt_models: HashMap<String, String>,
+    #[serde(default = "default_cloud_stt_base_url")]
+    pub cloud_stt_base_url: HashMap<String, String>,
+    #[serde(default = "default_cloud_stt_fallback_to_local")]
+    pub cloud_stt_fallback_to_local: bool,
+    #[serde(default = "default_cloud_stt_preload_local_model")]
+    pub cloud_stt_preload_local_model: bool,
+    #[serde(default = "default_cloud_stt_max_audio_seconds")]
+    pub cloud_stt_max_audio_seconds: u32,
+    #[serde(default = "default_cloud_stt_request_timeout_seconds")]
+    pub cloud_stt_request_timeout_seconds: u32,
     #[serde(default = "default_overlay_position")]
     pub overlay_position: OverlayPosition,
     #[serde(default = "default_debug_mode")]
@@ -388,6 +426,68 @@ fn default_update_checks_enabled() -> bool {
 
 fn default_selected_language() -> String {
     "auto".to_string()
+}
+
+fn default_transcription_backend() -> TranscriptionBackend {
+    TranscriptionBackend::Local
+}
+
+fn default_cloud_stt_provider_id() -> String {
+    CLOUD_STT_GROQ_PROVIDER_ID.to_string()
+}
+
+fn default_cloud_stt_api_keys() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    map.insert(CLOUD_STT_GROQ_PROVIDER_ID.to_string(), String::new());
+    map
+}
+
+fn default_cloud_stt_models() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    map.insert(
+        CLOUD_STT_GROQ_PROVIDER_ID.to_string(),
+        CLOUD_STT_GROQ_DEFAULT_MODEL.to_string(),
+    );
+    map
+}
+
+fn default_cloud_stt_base_url() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    map.insert(
+        CLOUD_STT_GROQ_PROVIDER_ID.to_string(),
+        CLOUD_STT_GROQ_DEFAULT_BASE_URL.to_string(),
+    );
+    map
+}
+
+fn default_cloud_stt_fallback_to_local() -> bool {
+    true
+}
+
+fn default_cloud_stt_preload_local_model() -> bool {
+    false
+}
+
+pub fn clamp_cloud_stt_max_audio_seconds(seconds: u32) -> u32 {
+    seconds.clamp(
+        CLOUD_STT_MAX_AUDIO_SECONDS_MIN,
+        CLOUD_STT_MAX_AUDIO_SECONDS_MAX,
+    )
+}
+
+fn default_cloud_stt_max_audio_seconds() -> u32 {
+    180
+}
+
+pub fn clamp_cloud_stt_request_timeout_seconds(seconds: u32) -> u32 {
+    seconds.clamp(
+        CLOUD_STT_REQUEST_TIMEOUT_SECONDS_MIN,
+        CLOUD_STT_REQUEST_TIMEOUT_SECONDS_MAX,
+    )
+}
+
+fn default_cloud_stt_request_timeout_seconds() -> u32 {
+    90
 }
 
 fn default_overlay_position() -> OverlayPosition {
@@ -626,6 +726,79 @@ fn ensure_post_process_defaults(settings: &mut AppSettings) -> bool {
     changed
 }
 
+fn ensure_cloud_stt_defaults(settings: &mut AppSettings) -> bool {
+    let mut changed = false;
+
+    if settings.cloud_stt_provider_id.trim().is_empty() {
+        settings.cloud_stt_provider_id = default_cloud_stt_provider_id();
+        changed = true;
+    }
+
+    if !settings
+        .cloud_stt_api_keys
+        .contains_key(CLOUD_STT_GROQ_PROVIDER_ID)
+    {
+        settings
+            .cloud_stt_api_keys
+            .insert(CLOUD_STT_GROQ_PROVIDER_ID.to_string(), String::new());
+        changed = true;
+    }
+
+    match settings
+        .cloud_stt_models
+        .get_mut(CLOUD_STT_GROQ_PROVIDER_ID)
+    {
+        Some(model) => {
+            if model.trim().is_empty() {
+                *model = CLOUD_STT_GROQ_DEFAULT_MODEL.to_string();
+                changed = true;
+            }
+        }
+        None => {
+            settings.cloud_stt_models.insert(
+                CLOUD_STT_GROQ_PROVIDER_ID.to_string(),
+                CLOUD_STT_GROQ_DEFAULT_MODEL.to_string(),
+            );
+            changed = true;
+        }
+    }
+
+    match settings
+        .cloud_stt_base_url
+        .get_mut(CLOUD_STT_GROQ_PROVIDER_ID)
+    {
+        Some(base_url) => {
+            if base_url.trim().is_empty() {
+                *base_url = CLOUD_STT_GROQ_DEFAULT_BASE_URL.to_string();
+                changed = true;
+            }
+        }
+        None => {
+            settings.cloud_stt_base_url.insert(
+                CLOUD_STT_GROQ_PROVIDER_ID.to_string(),
+                CLOUD_STT_GROQ_DEFAULT_BASE_URL.to_string(),
+            );
+            changed = true;
+        }
+    }
+
+    let clamped_max_seconds =
+        clamp_cloud_stt_max_audio_seconds(settings.cloud_stt_max_audio_seconds);
+    if settings.cloud_stt_max_audio_seconds != clamped_max_seconds {
+        settings.cloud_stt_max_audio_seconds = clamped_max_seconds;
+        changed = true;
+    }
+
+    let clamped_timeout =
+        clamp_cloud_stt_request_timeout_seconds(settings.cloud_stt_request_timeout_seconds);
+    if settings.cloud_stt_request_timeout_seconds != clamped_timeout {
+        settings.cloud_stt_request_timeout_seconds = clamped_timeout;
+        changed = true;
+    }
+
+    changed
+}
+
 pub const SETTINGS_STORE_PATH: &str = "settings_store.json";
 
 pub fn get_default_settings() -> AppSettings {
@@ -696,6 +869,15 @@ pub fn get_default_settings() -> AppSettings {
         selected_output_device: None,
         translate_to_english: false,
         selected_language: "auto".to_string(),
+        transcription_backend: default_transcription_backend(),
+        cloud_stt_provider_id: default_cloud_stt_provider_id(),
+        cloud_stt_api_keys: default_cloud_stt_api_keys(),
+        cloud_stt_models: default_cloud_stt_models(),
+        cloud_stt_base_url: default_cloud_stt_base_url(),
+        cloud_stt_fallback_to_local: default_cloud_stt_fallback_to_local(),
+        cloud_stt_preload_local_model: default_cloud_stt_preload_local_model(),
+        cloud_stt_max_audio_seconds: default_cloud_stt_max_audio_seconds(),
+        cloud_stt_request_timeout_seconds: default_cloud_stt_request_timeout_seconds(),
         overlay_position: default_overlay_position(),
         debug_mode: false,
         log_level: default_log_level(),
@@ -794,7 +976,10 @@ pub fn load_or_create_app_settings(app: &AppHandle) -> AppSettings {
         default_settings
     };
 
-    if ensure_post_process_defaults(&mut settings) {
+    let mut updated = false;
+    updated |= ensure_post_process_defaults(&mut settings);
+    updated |= ensure_cloud_stt_defaults(&mut settings);
+    if updated {
         store.set("settings", serde_json::to_value(&settings).unwrap());
     }
 
@@ -818,7 +1003,10 @@ pub fn get_settings(app: &AppHandle) -> AppSettings {
         default_settings
     };
 
-    if ensure_post_process_defaults(&mut settings) {
+    let mut updated = false;
+    updated |= ensure_post_process_defaults(&mut settings);
+    updated |= ensure_cloud_stt_defaults(&mut settings);
+    if updated {
         store.set("settings", serde_json::to_value(&settings).unwrap());
     }
 
