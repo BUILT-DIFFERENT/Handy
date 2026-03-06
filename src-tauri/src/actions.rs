@@ -1,6 +1,7 @@
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use crate::apple_intelligence;
 use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, SoundType};
+use crate::audio_toolkit::audio::{analyze_activity, should_skip_transcription};
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::history::HistoryManager;
 use crate::managers::transcription::TranscriptionManager;
@@ -14,7 +15,7 @@ use crate::utils::{
 };
 use crate::TranscriptionCoordinator;
 use ferrous_opencc::{config::BuiltinConfig, OpenCC};
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,6 +47,7 @@ struct TranscribeAction {
 
 /// Field name for structured output JSON schema
 const TRANSCRIPTION_FIELD: &str = "transcription";
+const WHISPER_SAMPLE_RATE: usize = 16_000;
 
 /// Strip invisible Unicode characters that some LLMs may insert
 fn strip_invisible_chars(s: &str) -> String {
@@ -330,6 +332,13 @@ fn trim_samples_for_cloud(mut samples: Vec<f32>, max_audio_seconds: u32) -> Vec<
     samples
 }
 
+fn pad_samples_for_local(mut samples: Vec<f32>) -> Vec<f32> {
+    if samples.len() < WHISPER_SAMPLE_RATE && !samples.is_empty() {
+        samples.resize(WHISPER_SAMPLE_RATE * 5 / 4, 0.0);
+    }
+    samples
+}
+
 fn ensure_local_model_loaded(
     tm: &Arc<TranscriptionManager>,
     settings: &AppSettings,
@@ -354,7 +363,7 @@ async fn transcribe_with_backend(
 ) -> Result<String, String> {
     match settings.transcription_backend {
         TranscriptionBackend::Local => tm
-            .transcribe(samples)
+            .transcribe(pad_samples_for_local(samples))
             .map_err(|e| format!("Local transcription failed: {}", e)),
         TranscriptionBackend::GroqCloud => {
             let trimmed_samples =
@@ -496,8 +505,26 @@ impl ShortcutAction for TranscribeAction {
                 );
 
                 let transcription_time = Instant::now();
-                let samples_clone = samples.clone(); // Clone for history saving
                 let settings = get_settings(&ah);
+                let activity_stats = analyze_activity(&samples, WHISPER_SAMPLE_RATE);
+
+                if should_skip_transcription(&activity_stats) {
+                    info!(
+                        "Skipping transcription due to low audio activity: duration={}ms peak={:.5} rms_dbfs={:.2} active_ratio={:.3} active_frames={}/{}",
+                        activity_stats.duration_ms,
+                        activity_stats.peak_abs,
+                        activity_stats.rms_dbfs,
+                        activity_stats.active_ratio,
+                        activity_stats.active_frames,
+                        activity_stats.total_frames
+                    );
+                    tm.maybe_unload_immediately("silence gate skip");
+                    utils::hide_recording_overlay(&ah);
+                    change_tray_icon(&ah, TrayIconState::Idle);
+                    return;
+                }
+
+                let samples_clone = samples.clone(); // Clone for history saving
                 match transcribe_with_backend(&tm, &settings, samples).await {
                     Ok(transcription) => {
                         debug!(

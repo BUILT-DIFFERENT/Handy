@@ -96,8 +96,6 @@ fn set_mute(mute: bool) {
     }
 }
 
-const WHISPER_SAMPLE_RATE: usize = 16000;
-
 /* ──────────────────────────────────────────────────────────────── */
 
 #[derive(Clone, Debug)]
@@ -400,16 +398,7 @@ impl AudioRecordingManager {
                     self.stop_microphone_stream();
                 }
 
-                // Pad if very short
-                let s_len = samples.len();
-                // debug!("Got {} samples", s_len);
-                if s_len < WHISPER_SAMPLE_RATE && s_len > 0 {
-                    let mut padded = samples;
-                    padded.resize(WHISPER_SAMPLE_RATE * 5 / 4, 0.0);
-                    Some(padded)
-                } else {
-                    Some(samples)
-                }
+                Some(samples)
             }
             _ => None,
         }

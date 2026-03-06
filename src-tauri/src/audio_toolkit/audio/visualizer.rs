@@ -1,10 +1,10 @@
 use rustfft::{num_complex::Complex32, Fft, FftPlanner};
 use std::sync::Arc;
 
-const DB_MIN: f32 = -55.0;
-const DB_MAX: f32 = -8.0;
-const GAIN: f32 = 1.3;
-const CURVE_POWER: f32 = 0.7;
+const SNR_MIN_DB: f32 = 3.0;
+const SNR_MAX_DB: f32 = 24.0;
+const GAIN: f32 = 1.25;
+const CURVE_POWER: f32 = 0.60;
 
 pub struct AudioVisualiser {
     fft: Arc<dyn Fft<f32>>,
@@ -132,8 +132,9 @@ impl AudioVisualiser {
                     NOISE_ALPHA * db + (1.0 - NOISE_ALPHA) * self.noise_floor[bucket_idx];
             }
 
-            // Map configurable dB range to 0-1 with gain and curve shaping
-            let normalized = ((db - DB_MIN) / (DB_MAX - DB_MIN)).clamp(0.0, 1.0);
+            // Map signal above the adaptive noise floor (SNR) to 0-1.
+            let snr_db = db - self.noise_floor[bucket_idx];
+            let normalized = ((snr_db - SNR_MIN_DB) / (SNR_MAX_DB - SNR_MIN_DB)).clamp(0.0, 1.0);
             buckets[bucket_idx] = (normalized * GAIN).powf(CURVE_POWER).clamp(0.0, 1.0);
         }
 
@@ -152,5 +153,36 @@ impl AudioVisualiser {
         self.buffer.clear();
         // Reset noise floor to initial values
         self.noise_floor.fill(-40.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visualizer_silence_stays_low() {
+        let mut v = AudioVisualiser::new(16_000, 512, 16, 400.0, 4000.0);
+        let silence = vec![0.0_f32; 512];
+        let levels = v.feed(&silence).expect("expected FFT output");
+        assert!(levels.iter().all(|l| *l <= 0.01));
+    }
+
+    #[test]
+    fn adaptive_visualizer_responds_to_quiet_voice() {
+        let mut v = AudioVisualiser::new(16_000, 512, 16, 400.0, 4000.0);
+        v.noise_floor.fill(-70.0);
+
+        let freq = 700.0_f32;
+        let amp = 0.005_f32;
+        let tone = (0..512)
+            .map(|i| {
+                let t = i as f32 / 16_000.0;
+                amp * (2.0 * std::f32::consts::PI * freq * t).sin()
+            })
+            .collect::<Vec<_>>();
+
+        let levels = v.feed(&tone).expect("expected FFT output");
+        assert!(levels.iter().any(|l| *l > 0.08));
     }
 }
