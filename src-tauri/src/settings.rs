@@ -9,12 +9,17 @@ use tauri_plugin_store::StoreExt;
 pub const APPLE_INTELLIGENCE_PROVIDER_ID: &str = "apple_intelligence";
 pub const APPLE_INTELLIGENCE_DEFAULT_MODEL_ID: &str = "Apple Intelligence";
 pub const CLOUD_STT_GROQ_PROVIDER_ID: &str = "groq";
+pub const CLOUD_STT_DEEPGRAM_PROVIDER_ID: &str = "deepgram";
 const CLOUD_STT_GROQ_DEFAULT_MODEL: &str = "whisper-large-v3";
 const CLOUD_STT_GROQ_DEFAULT_BASE_URL: &str = "https://api.groq.com/openai/v1";
+const CLOUD_STT_DEEPGRAM_DEFAULT_MODEL: &str = "nova-3";
+const CLOUD_STT_DEEPGRAM_DEFAULT_BASE_URL: &str = "wss://api.deepgram.com/v1/listen";
 const CLOUD_STT_MAX_AUDIO_SECONDS_MIN: u32 = 1;
 const CLOUD_STT_MAX_AUDIO_SECONDS_MAX: u32 = 300;
 const CLOUD_STT_REQUEST_TIMEOUT_SECONDS_MIN: u32 = 15;
 const CLOUD_STT_REQUEST_TIMEOUT_SECONDS_MAX: u32 = 300;
+const CLOUD_STT_FINALIZE_TIMEOUT_SECONDS_MIN: u32 = 1;
+const CLOUD_STT_FINALIZE_TIMEOUT_SECONDS_MAX: u32 = 30;
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
 #[serde(rename_all = "lowercase")]
@@ -181,6 +186,7 @@ pub enum KeyboardImplementation {
 pub enum TranscriptionBackend {
     Local,
     GroqCloud,
+    DeepgramStreaming,
 }
 
 impl Default for KeyboardImplementation {
@@ -343,6 +349,8 @@ pub struct AppSettings {
     pub cloud_stt_max_audio_seconds: u32,
     #[serde(default = "default_cloud_stt_request_timeout_seconds")]
     pub cloud_stt_request_timeout_seconds: u32,
+    #[serde(default = "default_cloud_stt_finalize_timeout_seconds")]
+    pub cloud_stt_finalize_timeout_seconds: u32,
     #[serde(default = "default_overlay_position")]
     pub overlay_position: OverlayPosition,
     #[serde(default = "default_debug_mode")]
@@ -439,6 +447,7 @@ fn default_cloud_stt_provider_id() -> String {
 fn default_cloud_stt_api_keys() -> HashMap<String, String> {
     let mut map = HashMap::new();
     map.insert(CLOUD_STT_GROQ_PROVIDER_ID.to_string(), String::new());
+    map.insert(CLOUD_STT_DEEPGRAM_PROVIDER_ID.to_string(), String::new());
     map
 }
 
@@ -448,6 +457,10 @@ fn default_cloud_stt_models() -> HashMap<String, String> {
         CLOUD_STT_GROQ_PROVIDER_ID.to_string(),
         CLOUD_STT_GROQ_DEFAULT_MODEL.to_string(),
     );
+    map.insert(
+        CLOUD_STT_DEEPGRAM_PROVIDER_ID.to_string(),
+        CLOUD_STT_DEEPGRAM_DEFAULT_MODEL.to_string(),
+    );
     map
 }
 
@@ -456,6 +469,10 @@ fn default_cloud_stt_base_url() -> HashMap<String, String> {
     map.insert(
         CLOUD_STT_GROQ_PROVIDER_ID.to_string(),
         CLOUD_STT_GROQ_DEFAULT_BASE_URL.to_string(),
+    );
+    map.insert(
+        CLOUD_STT_DEEPGRAM_PROVIDER_ID.to_string(),
+        CLOUD_STT_DEEPGRAM_DEFAULT_BASE_URL.to_string(),
     );
     map
 }
@@ -488,6 +505,25 @@ pub fn clamp_cloud_stt_request_timeout_seconds(seconds: u32) -> u32 {
 
 fn default_cloud_stt_request_timeout_seconds() -> u32 {
     90
+}
+
+pub fn clamp_cloud_stt_finalize_timeout_seconds(seconds: u32) -> u32 {
+    seconds.clamp(
+        CLOUD_STT_FINALIZE_TIMEOUT_SECONDS_MIN,
+        CLOUD_STT_FINALIZE_TIMEOUT_SECONDS_MAX,
+    )
+}
+
+fn default_cloud_stt_finalize_timeout_seconds() -> u32 {
+    5
+}
+
+pub fn cloud_provider_for_backend(backend: TranscriptionBackend) -> Option<&'static str> {
+    match backend {
+        TranscriptionBackend::Local => None,
+        TranscriptionBackend::GroqCloud => Some(CLOUD_STT_GROQ_PROVIDER_ID),
+        TranscriptionBackend::DeepgramStreaming => Some(CLOUD_STT_DEEPGRAM_PROVIDER_ID),
+    }
 }
 
 fn default_overlay_position() -> OverlayPosition {
@@ -744,6 +780,16 @@ fn ensure_cloud_stt_defaults(settings: &mut AppSettings) -> bool {
         changed = true;
     }
 
+    if !settings
+        .cloud_stt_api_keys
+        .contains_key(CLOUD_STT_DEEPGRAM_PROVIDER_ID)
+    {
+        settings
+            .cloud_stt_api_keys
+            .insert(CLOUD_STT_DEEPGRAM_PROVIDER_ID.to_string(), String::new());
+        changed = true;
+    }
+
     match settings
         .cloud_stt_models
         .get_mut(CLOUD_STT_GROQ_PROVIDER_ID)
@@ -782,6 +828,44 @@ fn ensure_cloud_stt_defaults(settings: &mut AppSettings) -> bool {
         }
     }
 
+    match settings
+        .cloud_stt_models
+        .get_mut(CLOUD_STT_DEEPGRAM_PROVIDER_ID)
+    {
+        Some(model) => {
+            if model.trim().is_empty() {
+                *model = CLOUD_STT_DEEPGRAM_DEFAULT_MODEL.to_string();
+                changed = true;
+            }
+        }
+        None => {
+            settings.cloud_stt_models.insert(
+                CLOUD_STT_DEEPGRAM_PROVIDER_ID.to_string(),
+                CLOUD_STT_DEEPGRAM_DEFAULT_MODEL.to_string(),
+            );
+            changed = true;
+        }
+    }
+
+    match settings
+        .cloud_stt_base_url
+        .get_mut(CLOUD_STT_DEEPGRAM_PROVIDER_ID)
+    {
+        Some(base_url) => {
+            if base_url.trim().is_empty() {
+                *base_url = CLOUD_STT_DEEPGRAM_DEFAULT_BASE_URL.to_string();
+                changed = true;
+            }
+        }
+        None => {
+            settings.cloud_stt_base_url.insert(
+                CLOUD_STT_DEEPGRAM_PROVIDER_ID.to_string(),
+                CLOUD_STT_DEEPGRAM_DEFAULT_BASE_URL.to_string(),
+            );
+            changed = true;
+        }
+    }
+
     let clamped_max_seconds =
         clamp_cloud_stt_max_audio_seconds(settings.cloud_stt_max_audio_seconds);
     if settings.cloud_stt_max_audio_seconds != clamped_max_seconds {
@@ -793,6 +877,23 @@ fn ensure_cloud_stt_defaults(settings: &mut AppSettings) -> bool {
         clamp_cloud_stt_request_timeout_seconds(settings.cloud_stt_request_timeout_seconds);
     if settings.cloud_stt_request_timeout_seconds != clamped_timeout {
         settings.cloud_stt_request_timeout_seconds = clamped_timeout;
+        changed = true;
+    }
+
+    let clamped_finalize_timeout =
+        clamp_cloud_stt_finalize_timeout_seconds(settings.cloud_stt_finalize_timeout_seconds);
+    if settings.cloud_stt_finalize_timeout_seconds != clamped_finalize_timeout {
+        settings.cloud_stt_finalize_timeout_seconds = clamped_finalize_timeout;
+        changed = true;
+    }
+
+    if let Some(provider_id) = cloud_provider_for_backend(settings.transcription_backend) {
+        if settings.cloud_stt_provider_id != provider_id {
+            settings.cloud_stt_provider_id = provider_id.to_string();
+            changed = true;
+        }
+    } else if settings.cloud_stt_provider_id.trim().is_empty() {
+        settings.cloud_stt_provider_id = default_cloud_stt_provider_id();
         changed = true;
     }
 
@@ -878,6 +979,7 @@ pub fn get_default_settings() -> AppSettings {
         cloud_stt_preload_local_model: default_cloud_stt_preload_local_model(),
         cloud_stt_max_audio_seconds: default_cloud_stt_max_audio_seconds(),
         cloud_stt_request_timeout_seconds: default_cloud_stt_request_timeout_seconds(),
+        cloud_stt_finalize_timeout_seconds: default_cloud_stt_finalize_timeout_seconds(),
         overlay_position: default_overlay_position(),
         debug_mode: false,
         log_level: default_log_level(),
@@ -1054,5 +1156,25 @@ mod tests {
         let settings = get_default_settings();
         assert!(!settings.auto_submit);
         assert_eq!(settings.auto_submit_key, AutoSubmitKey::Enter);
+    }
+
+    #[test]
+    fn default_settings_include_deepgram_cloud_defaults() {
+        let settings = get_default_settings();
+        assert_eq!(
+            settings
+                .cloud_stt_models
+                .get(CLOUD_STT_DEEPGRAM_PROVIDER_ID)
+                .map(String::as_str),
+            Some("nova-3")
+        );
+        assert_eq!(
+            settings
+                .cloud_stt_base_url
+                .get(CLOUD_STT_DEEPGRAM_PROVIDER_ID)
+                .map(String::as_str),
+            Some("wss://api.deepgram.com/v1/listen")
+        );
+        assert_eq!(settings.cloud_stt_finalize_timeout_seconds, 5);
     }
 }

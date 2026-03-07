@@ -18,8 +18,10 @@ import { Button } from "../../ui/Button";
 import type { TranscriptionBackend } from "@/bindings";
 
 const CLOUD_STT_DEFAULT_PROVIDER_ID = "groq";
+const CLOUD_STT_DEEPGRAM_PROVIDER_ID = "deepgram";
 const CLOUD_STT_MAX_AUDIO_SECONDS = [60, 120, 180, 300];
 const CLOUD_STT_TIMEOUT_SECONDS = [30, 60, 90, 120, 180, 300];
+const CLOUD_STT_FINALIZE_TIMEOUT_SECONDS = [2, 3, 5, 10, 15];
 
 export const GeneralSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -38,7 +40,9 @@ export const GeneralSettings: React.FC = () => {
 
   const transcriptionBackend = getSetting("transcription_backend") ?? "local";
   const cloudProviderId =
-    settings?.cloud_stt_provider_id ?? CLOUD_STT_DEFAULT_PROVIDER_ID;
+    transcriptionBackend === "deepgram_streaming"
+      ? CLOUD_STT_DEEPGRAM_PROVIDER_ID
+      : settings?.cloud_stt_provider_id ?? CLOUD_STT_DEFAULT_PROVIDER_ID;
 
   const cloudApiKey = settings?.cloud_stt_api_keys?.[cloudProviderId] ?? "";
   const cloudModel = settings?.cloud_stt_models?.[cloudProviderId] ?? "";
@@ -50,6 +54,8 @@ export const GeneralSettings: React.FC = () => {
   const cloudMaxAudioSeconds = getSetting("cloud_stt_max_audio_seconds") ?? 180;
   const cloudRequestTimeoutSeconds =
     getSetting("cloud_stt_request_timeout_seconds") ?? 90;
+  const cloudFinalizeTimeoutSeconds =
+    getSetting("cloud_stt_finalize_timeout_seconds") ?? 5;
 
   const [apiKeyInput, setApiKeyInput] = React.useState(cloudApiKey);
   const [baseUrlInput, setBaseUrlInput] = React.useState(cloudBaseUrl);
@@ -71,6 +77,10 @@ export const GeneralSettings: React.FC = () => {
       {
         value: "groq_cloud",
         label: t("settings.general.transcriptionBackend.options.groqCloud"),
+      },
+      {
+        value: "deepgram_streaming",
+        label: t("settings.general.transcriptionBackend.options.deepgramStreaming"),
       },
     ],
     [t],
@@ -116,11 +126,33 @@ export const GeneralSettings: React.FC = () => {
     }));
   }, [cloudRequestTimeoutSeconds, t]);
 
-  const isCloudBackend = transcriptionBackend === "groq_cloud";
+  const finalizeTimeoutOptions = React.useMemo<SelectOption[]>(() => {
+    const values = Array.from(
+      new Set([
+        cloudFinalizeTimeoutSeconds,
+        ...CLOUD_STT_FINALIZE_TIMEOUT_SECONDS,
+      ]),
+    ).sort((a, b) => a - b);
+
+    return values.map((seconds) => ({
+      value: String(seconds),
+      label: t("settings.general.cloudStt.secondsLabel", { seconds }),
+    }));
+  }, [cloudFinalizeTimeoutSeconds, t]);
+
+  const isCloudBackend =
+    transcriptionBackend === "groq_cloud" ||
+    transcriptionBackend === "deepgram_streaming";
+  const isDeepgramBackend = transcriptionBackend === "deepgram_streaming";
   const isCloudModelUpdating = isUpdating(`cloud_stt_model:${cloudProviderId}`);
   const isCloudModelsFetching = isUpdating(
     `cloud_stt_models_fetch:${cloudProviderId}`,
   );
+  const providerName = isDeepgramBackend ? "Deepgram" : "Groq";
+  const apiKeyPlaceholder = isDeepgramBackend ? "dg_..." : "gsk_...";
+  const baseUrlPlaceholder = isDeepgramBackend
+    ? "wss://api.deepgram.com/v1/listen"
+    : "https://api.groq.com/openai/v1";
 
   return (
     <div className="max-w-3xl w-full mx-auto space-y-6">
@@ -154,7 +186,9 @@ export const GeneralSettings: React.FC = () => {
           <>
             <SettingContainer
               title={t("settings.general.cloudStt.apiKey.title")}
-              description={t("settings.general.cloudStt.apiKey.description")}
+              description={t("settings.general.cloudStt.apiKey.description", {
+                provider: providerName,
+              })}
               grouped={true}
             >
               <Input
@@ -167,7 +201,7 @@ export const GeneralSettings: React.FC = () => {
                     void updateCloudSttApiKey(cloudProviderId, trimmed);
                   }
                 }}
-                placeholder={t("settings.general.cloudStt.apiKey.placeholder")}
+                placeholder={apiKeyPlaceholder}
                 variant="compact"
                 disabled={isUpdating(`cloud_stt_api_key:${cloudProviderId}`)}
                 className="min-w-[280px]"
@@ -176,7 +210,9 @@ export const GeneralSettings: React.FC = () => {
 
             <SettingContainer
               title={t("settings.general.cloudStt.model.title")}
-              description={t("settings.general.cloudStt.model.description")}
+              description={t("settings.general.cloudStt.model.description", {
+                provider: providerName,
+              })}
               grouped={true}
             >
               <div className="flex items-center gap-2">
@@ -221,7 +257,9 @@ export const GeneralSettings: React.FC = () => {
 
             <SettingContainer
               title={t("settings.general.cloudStt.baseUrl.title")}
-              description={t("settings.general.cloudStt.baseUrl.description")}
+              description={t("settings.general.cloudStt.baseUrl.description", {
+                provider: providerName,
+              })}
               grouped={true}
             >
               <Input
@@ -234,7 +272,7 @@ export const GeneralSettings: React.FC = () => {
                     void updateCloudSttBaseUrl(cloudProviderId, trimmed);
                   }
                 }}
-                placeholder={t("settings.general.cloudStt.baseUrl.placeholder")}
+                placeholder={baseUrlPlaceholder}
                 variant="compact"
                 disabled={isUpdating(`cloud_stt_base_url:${cloudProviderId}`)}
                 className="min-w-[280px]"
@@ -267,52 +305,105 @@ export const GeneralSettings: React.FC = () => {
               grouped={true}
             />
 
-            <SettingContainer
-              title={t("settings.general.cloudStt.maxAudioSeconds.title")}
-              description={t(
-                "settings.general.cloudStt.maxAudioSeconds.description",
-              )}
-              grouped={true}
-            >
-              <Select
-                value={String(cloudMaxAudioSeconds)}
-                options={maxAudioOptions}
-                onChange={(value) => {
-                  if (!value) return;
-                  const seconds = Number(value);
-                  if (!Number.isFinite(seconds)) return;
-                  void updateSetting("cloud_stt_max_audio_seconds", seconds);
-                }}
-                disabled={isUpdating("cloud_stt_max_audio_seconds")}
-                isClearable={false}
-                className="min-w-[200px]"
-              />
-            </SettingContainer>
+            {isDeepgramBackend ? (
+              <>
+                <SettingContainer
+                  title={t("settings.general.cloudStt.maxAudioSeconds.streamingTitle")}
+                  description={t(
+                    "settings.general.cloudStt.maxAudioSeconds.streamingDescription",
+                  )}
+                  grouped={true}
+                >
+                  <Select
+                    value={String(cloudMaxAudioSeconds)}
+                    options={maxAudioOptions}
+                    onChange={(value) => {
+                      if (!value) return;
+                      const seconds = Number(value);
+                      if (!Number.isFinite(seconds)) return;
+                      void updateSetting("cloud_stt_max_audio_seconds", seconds);
+                    }}
+                    disabled={isUpdating("cloud_stt_max_audio_seconds")}
+                    isClearable={false}
+                    className="min-w-[200px]"
+                  />
+                </SettingContainer>
 
-            <SettingContainer
-              title={t("settings.general.cloudStt.requestTimeoutSeconds.title")}
-              description={t(
-                "settings.general.cloudStt.requestTimeoutSeconds.description",
-              )}
-              grouped={true}
-            >
-              <Select
-                value={String(cloudRequestTimeoutSeconds)}
-                options={timeoutOptions}
-                onChange={(value) => {
-                  if (!value) return;
-                  const seconds = Number(value);
-                  if (!Number.isFinite(seconds)) return;
-                  void updateSetting(
-                    "cloud_stt_request_timeout_seconds",
-                    seconds,
-                  );
-                }}
-                disabled={isUpdating("cloud_stt_request_timeout_seconds")}
-                isClearable={false}
-                className="min-w-[200px]"
-              />
-            </SettingContainer>
+                <SettingContainer
+                  title={t("settings.general.cloudStt.finalizeTimeoutSeconds.title")}
+                  description={t(
+                    "settings.general.cloudStt.finalizeTimeoutSeconds.description",
+                  )}
+                  grouped={true}
+                >
+                  <Select
+                    value={String(cloudFinalizeTimeoutSeconds)}
+                    options={finalizeTimeoutOptions}
+                    onChange={(value) => {
+                      if (!value) return;
+                      const seconds = Number(value);
+                      if (!Number.isFinite(seconds)) return;
+                      void updateSetting(
+                        "cloud_stt_finalize_timeout_seconds",
+                        seconds,
+                      );
+                    }}
+                    disabled={isUpdating("cloud_stt_finalize_timeout_seconds")}
+                    isClearable={false}
+                    className="min-w-[200px]"
+                  />
+                </SettingContainer>
+              </>
+            ) : (
+              <>
+                <SettingContainer
+                  title={t("settings.general.cloudStt.maxAudioSeconds.title")}
+                  description={t(
+                    "settings.general.cloudStt.maxAudioSeconds.description",
+                  )}
+                  grouped={true}
+                >
+                  <Select
+                    value={String(cloudMaxAudioSeconds)}
+                    options={maxAudioOptions}
+                    onChange={(value) => {
+                      if (!value) return;
+                      const seconds = Number(value);
+                      if (!Number.isFinite(seconds)) return;
+                      void updateSetting("cloud_stt_max_audio_seconds", seconds);
+                    }}
+                    disabled={isUpdating("cloud_stt_max_audio_seconds")}
+                    isClearable={false}
+                    className="min-w-[200px]"
+                  />
+                </SettingContainer>
+
+                <SettingContainer
+                  title={t("settings.general.cloudStt.requestTimeoutSeconds.title")}
+                  description={t(
+                    "settings.general.cloudStt.requestTimeoutSeconds.description",
+                  )}
+                  grouped={true}
+                >
+                  <Select
+                    value={String(cloudRequestTimeoutSeconds)}
+                    options={timeoutOptions}
+                    onChange={(value) => {
+                      if (!value) return;
+                      const seconds = Number(value);
+                      if (!Number.isFinite(seconds)) return;
+                      void updateSetting(
+                        "cloud_stt_request_timeout_seconds",
+                        seconds,
+                      );
+                    }}
+                    disabled={isUpdating("cloud_stt_request_timeout_seconds")}
+                    isClearable={false}
+                    className="min-w-[200px]"
+                  />
+                </SettingContainer>
+              </>
+            )}
           </>
         )}
       </SettingsGroup>

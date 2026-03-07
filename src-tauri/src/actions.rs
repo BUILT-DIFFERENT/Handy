@@ -1,8 +1,9 @@
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use crate::apple_intelligence;
-use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, SoundType};
+use crate::audio_feedback::{play_feedback_sound, SoundType};
 use crate::audio_toolkit::audio::{analyze_activity, should_skip_transcription};
 use crate::managers::audio::AudioRecordingManager;
+use crate::managers::deepgram_streaming::DeepgramStreamingManager;
 use crate::managers::history::HistoryManager;
 use crate::managers::transcription::TranscriptionManager;
 use crate::settings::{
@@ -315,7 +316,9 @@ async fn maybe_convert_chinese_variant(
 fn should_preload_local_model(settings: &AppSettings) -> bool {
     match settings.transcription_backend {
         TranscriptionBackend::Local => true,
-        TranscriptionBackend::GroqCloud => settings.cloud_stt_preload_local_model,
+        TranscriptionBackend::GroqCloud | TranscriptionBackend::DeepgramStreaming => {
+            settings.cloud_stt_preload_local_model
+        }
     }
 }
 
@@ -358,6 +361,7 @@ fn ensure_local_model_loaded(
 
 async fn transcribe_with_backend(
     tm: &Arc<TranscriptionManager>,
+    deepgram_manager: &Arc<DeepgramStreamingManager>,
     settings: &AppSettings,
     samples: Vec<f32>,
 ) -> Result<String, String> {
@@ -385,6 +389,27 @@ async fn transcribe_with_backend(
                 }
             }
         }
+        TranscriptionBackend::DeepgramStreaming => {
+            match deepgram_manager
+                .finalize_and_collect(settings.cloud_stt_finalize_timeout_seconds)
+                .await
+            {
+                Ok(text) => Ok(text),
+                Err(deepgram_err) => {
+                    if !settings.cloud_stt_fallback_to_local {
+                        return Err(deepgram_err.to_string());
+                    }
+
+                    warn!(
+                        "Deepgram streaming failed ({}). Falling back to local model.",
+                        deepgram_err
+                    );
+                    ensure_local_model_loaded(tm, settings)?;
+                    tm.transcribe(pad_samples_for_local(samples))
+                        .map_err(|e| format!("Local fallback transcription failed: {}", e))
+                }
+            }
+        }
     }
 }
 
@@ -398,6 +423,7 @@ impl ShortcutAction for TranscribeAction {
         // Preload local model only when local backend is active, or when cloud mode
         // explicitly enables warm local fallback loading.
         let tm = app.state::<Arc<TranscriptionManager>>();
+        let deepgram_manager = app.state::<Arc<DeepgramStreamingManager>>();
         if should_preload_local_model(&settings) {
             tm.initiate_model_load();
         } else {
@@ -409,6 +435,28 @@ impl ShortcutAction for TranscribeAction {
         show_recording_overlay(app);
 
         let rm = app.state::<Arc<AudioRecordingManager>>();
+        if settings.transcription_backend == TranscriptionBackend::DeepgramStreaming {
+            rm.set_processed_frame_callback({
+                let deepgram_manager = Arc::clone(&deepgram_manager);
+                move |frame| {
+                    deepgram_manager.push_audio_frame(frame);
+                }
+            });
+
+            if let Err(err) = deepgram_manager.start_session(settings.clone()) {
+                rm.clear_processed_frame_callback();
+                if settings.cloud_stt_fallback_to_local {
+                    warn!(
+                        "Deepgram session failed to start ({}). Using local fallback if needed.",
+                        err
+                    );
+                } else {
+                    error!("Deepgram session failed to start: {}", err);
+                }
+            }
+        } else {
+            rm.clear_processed_frame_callback();
+        }
 
         // Get the microphone mode to determine audio feedback timing
         let is_always_on = settings.always_on_microphone;
@@ -416,41 +464,26 @@ impl ShortcutAction for TranscribeAction {
 
         let mut recording_started = false;
         if is_always_on {
-            // Always-on mode: Play audio feedback immediately, then apply mute after sound finishes
-            debug!("Always-on mode: Playing audio feedback immediately");
-            let rm_clone = Arc::clone(&rm);
-            let app_clone = app.clone();
-            // The blocking helper exits immediately if audio feedback is disabled,
-            // so we can always reuse this thread to ensure mute happens right after playback.
-            std::thread::spawn(move || {
-                play_feedback_sound_blocking(&app_clone, SoundType::Start);
-                rm_clone.apply_mute();
-            });
-
             recording_started = rm.try_start_recording(&binding_id);
+            if recording_started {
+                rm.apply_mute();
+            }
             debug!("Recording started: {}", recording_started);
         } else {
-            // On-demand mode: Start recording first, then play audio feedback, then apply mute
-            // This allows the microphone to be activated before playing the sound
-            debug!("On-demand mode: Starting recording first, then audio feedback");
+            debug!("On-demand mode: Starting recording immediately");
             let recording_start_time = Instant::now();
             if rm.try_start_recording(&binding_id) {
                 recording_started = true;
+                rm.apply_mute();
                 debug!("Recording started in {:?}", recording_start_time.elapsed());
-                // Small delay to ensure microphone stream is active
-                let app_clone = app.clone();
-                let rm_clone = Arc::clone(&rm);
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    debug!("Handling delayed audio feedback/mute sequence");
-                    // Helper handles disabled audio feedback by returning early, so we reuse it
-                    // to keep mute sequencing consistent in every mode.
-                    play_feedback_sound_blocking(&app_clone, SoundType::Start);
-                    rm_clone.apply_mute();
-                });
             } else {
                 debug!("Failed to start recording");
             }
+        }
+
+        if !recording_started {
+            rm.clear_processed_frame_callback();
+            deepgram_manager.cancel_session();
         }
 
         if recording_started {
@@ -473,6 +506,7 @@ impl ShortcutAction for TranscribeAction {
 
         let ah = app.clone();
         let rm = Arc::clone(&app.state::<Arc<AudioRecordingManager>>());
+        let deepgram_manager = Arc::clone(&app.state::<Arc<DeepgramStreamingManager>>());
         let tm = Arc::clone(&app.state::<Arc<TranscriptionManager>>());
         let hm = Arc::clone(&app.state::<Arc<HistoryManager>>());
 
@@ -509,6 +543,7 @@ impl ShortcutAction for TranscribeAction {
                 let activity_stats = analyze_activity(&samples, WHISPER_SAMPLE_RATE);
 
                 if should_skip_transcription(&activity_stats) {
+                    deepgram_manager.cancel_session();
                     info!(
                         "Skipping transcription due to low audio activity: duration={}ms peak={:.5} rms_dbfs={:.2} active_ratio={:.3} active_frames={}/{}",
                         activity_stats.duration_ms,
@@ -525,7 +560,7 @@ impl ShortcutAction for TranscribeAction {
                 }
 
                 let samples_clone = samples.clone(); // Clone for history saving
-                match transcribe_with_backend(&tm, &settings, samples).await {
+                match transcribe_with_backend(&tm, &deepgram_manager, &settings, samples).await {
                     Ok(transcription) => {
                         debug!(
                             "Transcription completed in {:?}: '{}'",
@@ -622,6 +657,7 @@ impl ShortcutAction for TranscribeAction {
                     }
                 }
             } else {
+                deepgram_manager.cancel_session();
                 debug!("No samples retrieved from recording stop");
                 utils::hide_recording_overlay(&ah);
                 change_tray_icon(&ah, TrayIconState::Idle);

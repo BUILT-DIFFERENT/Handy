@@ -304,6 +304,10 @@ impl AudioRecordingManager {
         debug!("Microphone stream stopped");
     }
 
+    pub fn prewarm_microphone_stream(&self) -> Result<(), anyhow::Error> {
+        self.start_microphone_stream()
+    }
+
     /* ---------- mode switching --------------------------------------------- */
 
     pub fn update_mode(&self, new_mode: MicrophoneMode) -> Result<(), anyhow::Error> {
@@ -311,12 +315,7 @@ impl AudioRecordingManager {
         let cur_mode = mode_guard.clone();
 
         match (cur_mode, &new_mode) {
-            (MicrophoneMode::AlwaysOn, MicrophoneMode::OnDemand) => {
-                if matches!(*self.state.lock().unwrap(), RecordingState::Idle) {
-                    drop(mode_guard);
-                    self.stop_microphone_stream();
-                }
-            }
+            (MicrophoneMode::AlwaysOn, MicrophoneMode::OnDemand) => {}
             (MicrophoneMode::OnDemand, MicrophoneMode::AlwaysOn) => {
                 drop(mode_guard);
                 self.start_microphone_stream()?;
@@ -368,6 +367,21 @@ impl AudioRecordingManager {
         Ok(())
     }
 
+    pub fn set_processed_frame_callback<F>(&self, callback: F)
+    where
+        F: Fn(Vec<f32>) + Send + Sync + 'static,
+    {
+        if let Some(recorder) = self.recorder.lock().unwrap().as_ref() {
+            recorder.set_processed_frame_callback(callback);
+        }
+    }
+
+    pub fn clear_processed_frame_callback(&self) {
+        if let Some(recorder) = self.recorder.lock().unwrap().as_ref() {
+            recorder.clear_processed_frame_callback();
+        }
+    }
+
     pub fn stop_recording(&self, binding_id: &str) -> Option<Vec<f32>> {
         let mut state = self.state.lock().unwrap();
 
@@ -392,11 +406,7 @@ impl AudioRecordingManager {
                 };
 
                 *self.is_recording.lock().unwrap() = false;
-
-                // In on-demand mode turn the mic off again
-                if matches!(*self.mode.lock().unwrap(), MicrophoneMode::OnDemand) {
-                    self.stop_microphone_stream();
-                }
+                self.clear_processed_frame_callback();
 
                 Some(samples)
             }
@@ -423,11 +433,7 @@ impl AudioRecordingManager {
             }
 
             *self.is_recording.lock().unwrap() = false;
-
-            // In on-demand mode turn the mic off again
-            if matches!(*self.mode.lock().unwrap(), MicrophoneMode::OnDemand) {
-                self.stop_microphone_stream();
-            }
+            self.clear_processed_frame_callback();
         }
     }
 }

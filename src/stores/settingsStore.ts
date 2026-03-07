@@ -149,6 +149,8 @@ const settingUpdaters: {
     commands.changeCloudSttMaxAudioSecondsSetting(value as number),
   cloud_stt_request_timeout_seconds: (value) =>
     commands.changeCloudSttRequestTimeoutSetting(value as number),
+  cloud_stt_finalize_timeout_seconds: (value) =>
+    commands.changeCloudSttFinalizeTimeoutSetting(value as number),
   overlay_position: (value) =>
     commands.changeOverlayPositionSetting(value as string),
   debug_mode: (value) => commands.changeDebugModeSetting(value as boolean),

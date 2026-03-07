@@ -22,12 +22,15 @@ enum Cmd {
     Shutdown,
 }
 
+type ProcessedFrameCallback = Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>;
+
 pub struct AudioRecorder {
     device: Option<Device>,
     cmd_tx: Option<mpsc::Sender<Cmd>>,
     worker_handle: Option<std::thread::JoinHandle<()>>,
     vad: Option<Arc<Mutex<Box<dyn vad::VoiceActivityDetector>>>>,
     level_cb: Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
+    processed_frame_cb: Arc<Mutex<Option<ProcessedFrameCallback>>>,
 }
 
 impl AudioRecorder {
@@ -38,6 +41,7 @@ impl AudioRecorder {
             worker_handle: None,
             vad: None,
             level_cb: None,
+            processed_frame_cb: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -74,6 +78,7 @@ impl AudioRecorder {
         let vad = self.vad.clone();
         // Move the optional level callback into the worker thread
         let level_cb = self.level_cb.clone();
+        let processed_frame_cb = self.processed_frame_cb.clone();
 
         let worker = std::thread::spawn(move || {
             let config = AudioRecorder::get_preferred_config(&thread_device)
@@ -117,7 +122,14 @@ impl AudioRecorder {
             stream.play().expect("failed to start stream");
 
             // keep the stream alive while we process samples
-            run_consumer(sample_rate, vad, sample_rx, cmd_rx, level_cb);
+            run_consumer(
+                sample_rate,
+                vad,
+                sample_rx,
+                cmd_rx,
+                level_cb,
+                processed_frame_cb,
+            );
             // stream is dropped here, after run_consumer returns
         });
 
@@ -152,6 +164,17 @@ impl AudioRecorder {
         }
         self.device = None;
         Ok(())
+    }
+
+    pub fn set_processed_frame_callback<F>(&self, callback: F)
+    where
+        F: Fn(Vec<f32>) + Send + Sync + 'static,
+    {
+        *self.processed_frame_cb.lock().unwrap() = Some(Arc::new(callback));
+    }
+
+    pub fn clear_processed_frame_callback(&self) {
+        *self.processed_frame_cb.lock().unwrap() = None;
     }
 
     fn build_stream<T>(
@@ -245,6 +268,7 @@ fn run_consumer(
     sample_rx: mpsc::Receiver<Vec<f32>>,
     cmd_rx: mpsc::Receiver<Cmd>,
     level_cb: Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
+    processed_frame_cb: Arc<Mutex<Option<ProcessedFrameCallback>>>,
 ) {
     let mut frame_resampler = FrameResampler::new(
         in_sample_rate as usize,
@@ -271,6 +295,7 @@ fn run_consumer(
         recording: bool,
         vad: &Option<Arc<Mutex<Box<dyn vad::VoiceActivityDetector>>>>,
         out_buf: &mut Vec<f32>,
+        processed_frame_cb: &Arc<Mutex<Option<ProcessedFrameCallback>>>,
     ) {
         if !recording {
             return;
@@ -279,11 +304,19 @@ fn run_consumer(
         if let Some(vad_arc) = vad {
             let mut det = vad_arc.lock().unwrap();
             match det.push_frame(samples).unwrap_or(VadFrame::Speech(samples)) {
-                VadFrame::Speech(buf) => out_buf.extend_from_slice(buf),
+                VadFrame::Speech(buf) => {
+                    out_buf.extend_from_slice(buf);
+                    if let Some(callback) = processed_frame_cb.lock().unwrap().clone() {
+                        callback(buf.to_vec());
+                    }
+                }
                 VadFrame::Noise => {}
             }
         } else {
             out_buf.extend_from_slice(samples);
+            if let Some(callback) = processed_frame_cb.lock().unwrap().clone() {
+                callback(samples.to_vec());
+            }
         }
     }
 
@@ -302,7 +335,13 @@ fn run_consumer(
 
         // ---------- existing pipeline ------------------------------------ //
         frame_resampler.push(&raw, &mut |frame: &[f32]| {
-            handle_frame(frame, recording, &vad, &mut processed_samples)
+            handle_frame(
+                frame,
+                recording,
+                &vad,
+                &mut processed_samples,
+                &processed_frame_cb,
+            )
         });
 
         // non-blocking check for a command
@@ -322,12 +361,24 @@ fn run_consumer(
                     // Drain any audio chunks that were captured but not yet consumed
                     while let Ok(remaining) = sample_rx.try_recv() {
                         frame_resampler.push(&remaining, &mut |frame: &[f32]| {
-                            handle_frame(frame, true, &vad, &mut processed_samples)
+                            handle_frame(
+                                frame,
+                                true,
+                                &vad,
+                                &mut processed_samples,
+                                &processed_frame_cb,
+                            )
                         });
                     }
 
                     frame_resampler.finish(&mut |frame: &[f32]| {
-                        handle_frame(frame, true, &vad, &mut processed_samples)
+                        handle_frame(
+                            frame,
+                            true,
+                            &vad,
+                            &mut processed_samples,
+                            &processed_frame_cb,
+                        )
                     });
 
                     let _ = reply_tx.send(std::mem::take(&mut processed_samples));

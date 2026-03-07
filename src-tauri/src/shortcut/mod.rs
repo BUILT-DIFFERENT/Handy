@@ -20,11 +20,12 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::settings::{
-    self, clamp_cloud_stt_max_audio_seconds, clamp_cloud_stt_request_timeout_seconds, get_settings,
+    self, clamp_cloud_stt_finalize_timeout_seconds, clamp_cloud_stt_max_audio_seconds,
+    clamp_cloud_stt_request_timeout_seconds, cloud_provider_for_backend, get_settings,
     AutoSubmitKey, ClipboardHandling, KeyboardImplementation, LLMPrompt, OverlayPosition,
     PasteMethod, ShortcutBinding, SoundTheme, TranscriptionBackend, TypingTool,
     APPLE_INTELLIGENCE_DEFAULT_MODEL_ID, APPLE_INTELLIGENCE_PROVIDER_ID,
-    CLOUD_STT_GROQ_PROVIDER_ID,
+    CLOUD_STT_DEEPGRAM_PROVIDER_ID, CLOUD_STT_GROQ_PROVIDER_ID,
 };
 use crate::tray;
 
@@ -541,13 +542,17 @@ pub fn change_transcription_backend_setting(app: AppHandle, backend: String) -> 
     settings.transcription_backend = match backend.as_str() {
         "local" => TranscriptionBackend::Local,
         "groq_cloud" => TranscriptionBackend::GroqCloud,
+        "deepgram_streaming" => TranscriptionBackend::DeepgramStreaming,
         other => {
             return Err(format!(
-                "Invalid transcription backend '{}'. Expected 'local' or 'groq_cloud'.",
+                "Invalid transcription backend '{}'. Expected 'local', 'groq_cloud', or 'deepgram_streaming'.",
                 other
             ));
         }
     };
+    if let Some(provider_id) = cloud_provider_for_backend(settings.transcription_backend) {
+        settings.cloud_stt_provider_id = provider_id.to_string();
+    }
     settings::write_settings(&app, settings);
     Ok(())
 }
@@ -869,12 +874,12 @@ fn validate_provider_exists(
 }
 
 fn validate_cloud_provider_id(provider_id: &str) -> Result<(), String> {
-    if provider_id == CLOUD_STT_GROQ_PROVIDER_ID {
+    if provider_id == CLOUD_STT_GROQ_PROVIDER_ID || provider_id == CLOUD_STT_DEEPGRAM_PROVIDER_ID {
         return Ok(());
     }
     Err(format!(
-        "Unsupported cloud STT provider '{}'. Currently supported: '{}'.",
-        provider_id, CLOUD_STT_GROQ_PROVIDER_ID
+        "Unsupported cloud STT provider '{}'. Currently supported: '{}' and '{}'.",
+        provider_id, CLOUD_STT_GROQ_PROVIDER_ID, CLOUD_STT_DEEPGRAM_PROVIDER_ID
     ))
 }
 
@@ -961,6 +966,18 @@ pub fn change_cloud_stt_request_timeout_setting(
 ) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
     settings.cloud_stt_request_timeout_seconds = clamp_cloud_stt_request_timeout_seconds(seconds);
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_cloud_stt_finalize_timeout_setting(
+    app: AppHandle,
+    seconds: u32,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.cloud_stt_finalize_timeout_seconds = clamp_cloud_stt_finalize_timeout_seconds(seconds);
     settings::write_settings(&app, settings);
     Ok(())
 }
@@ -1131,6 +1148,15 @@ pub async fn fetch_cloud_stt_models(
     provider_id: String,
 ) -> Result<Vec<String>, String> {
     validate_cloud_provider_id(&provider_id)?;
+
+    if provider_id == CLOUD_STT_DEEPGRAM_PROVIDER_ID {
+        return Ok(vec![
+            "nova-3".to_string(),
+            "nova-3-general".to_string(),
+            "nova-3-medical".to_string(),
+        ]);
+    }
+
     let settings = settings::get_settings(&app);
 
     let api_key = settings

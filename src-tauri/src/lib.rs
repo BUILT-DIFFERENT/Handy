@@ -26,6 +26,7 @@ use tauri_specta::{collect_commands, Builder};
 
 use env_filter::Builder as EnvFilterBuilder;
 use managers::audio::AudioRecordingManager;
+use managers::deepgram_streaming::DeepgramStreamingManager;
 use managers::history::HistoryManager;
 use managers::model::ModelManager;
 use managers::transcription::TranscriptionManager;
@@ -123,12 +124,18 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     );
     let history_manager =
         Arc::new(HistoryManager::new(app_handle).expect("Failed to initialize history manager"));
+    let deepgram_streaming_manager = Arc::new(DeepgramStreamingManager::new());
 
     // Add managers to Tauri's managed state
     app_handle.manage(recording_manager.clone());
     app_handle.manage(model_manager.clone());
     app_handle.manage(transcription_manager.clone());
     app_handle.manage(history_manager.clone());
+    app_handle.manage(deepgram_streaming_manager.clone());
+
+    if let Err(err) = recording_manager.prewarm_microphone_stream() {
+        log::warn!("Microphone prewarm failed during app startup: {}", err);
+    }
 
     // Note: Shortcuts are NOT initialized here.
     // The frontend is responsible for calling the `initialize_shortcuts` command
@@ -291,6 +298,7 @@ pub fn run(cli_args: CliArgs) {
         shortcut::change_cloud_stt_preload_local_model_setting,
         shortcut::change_cloud_stt_max_audio_seconds_setting,
         shortcut::change_cloud_stt_request_timeout_setting,
+        shortcut::change_cloud_stt_finalize_timeout_setting,
         shortcut::set_post_process_provider,
         shortcut::fetch_post_process_models,
         shortcut::fetch_cloud_stt_models,
