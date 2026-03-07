@@ -110,6 +110,8 @@ struct DeepgramResultMessage {
     #[serde(default)]
     is_final: Option<bool>,
     #[serde(default)]
+    speech_final: Option<bool>,
+    #[serde(default)]
     from_finalize: Option<bool>,
     channel: DeepgramChannel,
 }
@@ -306,7 +308,11 @@ async fn run_session_inner(
 
                         if let Ok(result) = serde_json::from_str::<DeepgramResultMessage>(&text) {
                             transcript.add_result(&result);
-                            if result.from_finalize.unwrap_or(false) {
+                            // Return as soon as Deepgram marks the utterance as final, instead of
+                            // waiting only for an explicit from_finalize event.
+                            if result.from_finalize.unwrap_or(false)
+                                || result.speech_final.unwrap_or(false)
+                            {
                                 let final_text = transcript.final_text();
                                 if let Some(reply_tx) = finalize_tx.take() {
                                     let result = if final_text.is_empty() {
@@ -505,6 +511,7 @@ mod tests {
         accumulator.add_result(&DeepgramResultMessage {
             start: 0.0,
             is_final: Some(false),
+            speech_final: Some(false),
             from_finalize: Some(false),
             channel: DeepgramChannel {
                 alternatives: vec![DeepgramAlternative {
@@ -521,6 +528,7 @@ mod tests {
         accumulator.add_result(&DeepgramResultMessage {
             start: 1.0,
             is_final: Some(true),
+            speech_final: Some(false),
             from_finalize: Some(false),
             channel: DeepgramChannel {
                 alternatives: vec![DeepgramAlternative {
@@ -531,6 +539,7 @@ mod tests {
         accumulator.add_result(&DeepgramResultMessage {
             start: 0.0,
             is_final: Some(true),
+            speech_final: Some(false),
             from_finalize: Some(false),
             channel: DeepgramChannel {
                 alternatives: vec![DeepgramAlternative {
@@ -541,6 +550,7 @@ mod tests {
         accumulator.add_result(&DeepgramResultMessage {
             start: 1.0,
             is_final: Some(true),
+            speech_final: Some(false),
             from_finalize: Some(false),
             channel: DeepgramChannel {
                 alternatives: vec![DeepgramAlternative {

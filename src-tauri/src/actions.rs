@@ -513,12 +513,6 @@ impl ShortcutAction for TranscribeAction {
         change_tray_icon(app, TrayIconState::Transcribing);
         show_transcribing_overlay(app);
 
-        // Unmute before playing audio feedback so the stop sound is audible
-        rm.remove_mute();
-
-        // Play audio feedback for recording stop
-        play_feedback_sound(app, SoundType::Stop);
-
         let binding_id = binding_id.to_string(); // Clone binding_id for the async task
         let post_process = self.post_process;
 
@@ -537,6 +531,10 @@ impl ShortcutAction for TranscribeAction {
                     stop_recording_time.elapsed(),
                     samples.len()
                 );
+                // Stop capture first, then play feedback so sound playback never blocks
+                // the stop-to-transcription path.
+                rm.remove_mute();
+                play_feedback_sound(&ah, SoundType::Stop);
 
                 let transcription_time = Instant::now();
                 let settings = get_settings(&ah);
