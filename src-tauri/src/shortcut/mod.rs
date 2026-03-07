@@ -13,6 +13,7 @@ mod handler;
 pub mod handy_keys;
 mod tauri_impl;
 
+use crate::managers::deepgram_streaming::DeepgramStreamingManager;
 use log::{error, info, warn};
 use serde::Serialize;
 use specta::Type;
@@ -24,10 +25,20 @@ use crate::settings::{
     clamp_cloud_stt_request_timeout_seconds, cloud_provider_for_backend, get_settings,
     AutoSubmitKey, ClipboardHandling, KeyboardImplementation, LLMPrompt, OverlayPosition,
     PasteMethod, ShortcutBinding, SoundTheme, TranscriptionBackend, TypingTool,
-    APPLE_INTELLIGENCE_DEFAULT_MODEL_ID, APPLE_INTELLIGENCE_PROVIDER_ID,
-    CLOUD_STT_DEEPGRAM_PROVIDER_ID, CLOUD_STT_GROQ_PROVIDER_ID,
+    APPLE_INTELLIGENCE_PROVIDER_ID, CLOUD_STT_DEEPGRAM_PROVIDER_ID,
+    CLOUD_STT_GROQ_PROVIDER_ID,
 };
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use crate::settings::APPLE_INTELLIGENCE_DEFAULT_MODEL_ID;
 use crate::tray;
+
+fn refresh_deepgram_preconnect(app: &AppHandle, settings: &settings::AppSettings) {
+    if let Some(manager) = app.try_state::<std::sync::Arc<DeepgramStreamingManager>>() {
+        if let Err(err) = manager.ensure_preconnected(settings.clone()) {
+            warn!("Deepgram preconnect refresh skipped: {}", err);
+        }
+    }
+}
 
 // Note: Commands are accessed via shortcut::handy_keys:: in lib.rs
 
@@ -531,7 +542,8 @@ pub fn change_translate_to_english_setting(app: AppHandle, enabled: bool) -> Res
 pub fn change_selected_language_setting(app: AppHandle, language: String) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
     settings.selected_language = language;
-    settings::write_settings(&app, settings);
+    settings::write_settings(&app, settings.clone());
+    refresh_deepgram_preconnect(&app, &settings);
     Ok(())
 }
 
@@ -553,7 +565,8 @@ pub fn change_transcription_backend_setting(app: AppHandle, backend: String) -> 
     if let Some(provider_id) = cloud_provider_for_backend(settings.transcription_backend) {
         settings.cloud_stt_provider_id = provider_id.to_string();
     }
-    settings::write_settings(&app, settings);
+    settings::write_settings(&app, settings.clone());
+    refresh_deepgram_preconnect(&app, &settings);
     Ok(())
 }
 
@@ -893,7 +906,8 @@ pub fn change_cloud_stt_api_key_setting(
     validate_cloud_provider_id(&provider_id)?;
     let mut settings = settings::get_settings(&app);
     settings.cloud_stt_api_keys.insert(provider_id, api_key);
-    settings::write_settings(&app, settings);
+    settings::write_settings(&app, settings.clone());
+    refresh_deepgram_preconnect(&app, &settings);
     Ok(())
 }
 
@@ -907,7 +921,8 @@ pub fn change_cloud_stt_model_setting(
     validate_cloud_provider_id(&provider_id)?;
     let mut settings = settings::get_settings(&app);
     settings.cloud_stt_models.insert(provider_id, model);
-    settings::write_settings(&app, settings);
+    settings::write_settings(&app, settings.clone());
+    refresh_deepgram_preconnect(&app, &settings);
     Ok(())
 }
 
@@ -921,7 +936,8 @@ pub fn change_cloud_stt_base_url_setting(
     validate_cloud_provider_id(&provider_id)?;
     let mut settings = settings::get_settings(&app);
     settings.cloud_stt_base_url.insert(provider_id, base_url);
-    settings::write_settings(&app, settings);
+    settings::write_settings(&app, settings.clone());
+    refresh_deepgram_preconnect(&app, &settings);
     Ok(())
 }
 

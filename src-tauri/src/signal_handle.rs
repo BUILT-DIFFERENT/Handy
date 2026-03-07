@@ -1,5 +1,5 @@
 use crate::TranscriptionCoordinator;
-use log::{debug, warn};
+use log::warn;
 use tauri::{AppHandle, Manager};
 
 #[cfg(unix)]
@@ -8,6 +8,8 @@ use signal_hook::consts::{SIGUSR1, SIGUSR2};
 use signal_hook::iterator::Signals;
 #[cfg(unix)]
 use std::thread;
+#[cfg(unix)]
+use log::debug;
 
 /// Send a transcription input to the coordinator.
 /// Used by signal handlers, CLI flags, and any other external trigger.

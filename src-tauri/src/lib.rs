@@ -21,6 +21,7 @@ mod tray_i18n;
 mod utils;
 
 pub use cli::CliArgs;
+#[cfg(debug_assertions)]
 use specta_typescript::{BigIntExportBehavior, Typescript};
 use tauri_specta::{collect_commands, Builder};
 
@@ -135,6 +136,10 @@ fn initialize_core_logic(app_handle: &AppHandle) {
 
     if let Err(err) = recording_manager.prewarm_microphone_stream() {
         log::warn!("Microphone prewarm failed during app startup: {}", err);
+    }
+    let settings = settings::get_settings(app_handle);
+    if let Err(err) = deepgram_streaming_manager.ensure_preconnected(settings.clone()) {
+        log::warn!("Deepgram preconnect skipped during app startup: {}", err);
     }
 
     // Note: Shortcuts are NOT initialized here.
@@ -344,6 +349,7 @@ pub fn run(cli_args: CliArgs) {
         commands::models::has_any_models_or_downloads,
         commands::audio::update_microphone_mode,
         commands::audio::get_microphone_mode,
+        commands::audio::change_mic_warm_mode_setting,
         commands::audio::get_available_microphones,
         commands::audio::set_selected_microphone,
         commands::audio::get_selected_microphone,
@@ -375,7 +381,7 @@ pub fn run(cli_args: CliArgs) {
         )
         .expect("Failed to export typescript bindings");
 
-    let mut builder = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .device_event_filter(tauri::DeviceEventFilter::Always)
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -403,9 +409,7 @@ pub fn run(cli_args: CliArgs) {
         );
 
     #[cfg(target_os = "macos")]
-    {
-        builder = builder.plugin(tauri_nspanel::init());
-    }
+    let builder = builder.plugin(tauri_nspanel::init());
 
     builder
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -477,7 +481,11 @@ pub fn run(cli_args: CliArgs) {
                 api.prevent_close();
                 let _res = window.hide();
 
+                #[cfg(not(target_os = "macos"))]
+                let _settings = get_settings(&window.app_handle());
+                #[cfg(target_os = "macos")]
                 let settings = get_settings(&window.app_handle());
+                #[cfg(target_os = "macos")]
                 let tray_visible =
                     settings.show_tray_icon && !window.app_handle().state::<CliArgs>().no_tray;
 

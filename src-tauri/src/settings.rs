@@ -183,6 +183,14 @@ pub enum KeyboardImplementation {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
 #[serde(rename_all = "snake_case")]
+pub enum MicWarmMode {
+    Off,
+    Timed,
+    Always,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
+#[serde(rename_all = "snake_case")]
 pub enum TranscriptionBackend {
     Local,
     GroqCloud,
@@ -197,6 +205,12 @@ impl Default for KeyboardImplementation {
         return KeyboardImplementation::HandyKeys;
         #[cfg(not(target_os = "macos"))]
         return KeyboardImplementation::Tauri;
+    }
+}
+
+impl Default for MicWarmMode {
+    fn default() -> Self {
+        MicWarmMode::Off
     }
 }
 
@@ -321,6 +335,8 @@ pub struct AppSettings {
     pub selected_model: String,
     #[serde(default = "default_always_on_microphone")]
     pub always_on_microphone: bool,
+    #[serde(default = "default_mic_warm_mode")]
+    pub mic_warm_mode: MicWarmMode,
     #[serde(default)]
     pub selected_microphone: Option<String>,
     #[serde(default)]
@@ -414,6 +430,10 @@ fn default_model() -> String {
 
 fn default_always_on_microphone() -> bool {
     false
+}
+
+fn default_mic_warm_mode() -> MicWarmMode {
+    MicWarmMode::Off
 }
 
 fn default_translate_to_english() -> bool {
@@ -900,6 +920,28 @@ fn ensure_cloud_stt_defaults(settings: &mut AppSettings) -> bool {
     changed
 }
 
+fn ensure_mic_warm_mode_defaults(settings: &mut AppSettings) -> bool {
+    let desired_mode = if settings.always_on_microphone {
+        MicWarmMode::Always
+    } else {
+        settings.mic_warm_mode
+    };
+
+    let mut changed = false;
+    if settings.mic_warm_mode != desired_mode {
+        settings.mic_warm_mode = desired_mode;
+        changed = true;
+    }
+
+    let legacy_always_on = settings.mic_warm_mode == MicWarmMode::Always;
+    if settings.always_on_microphone != legacy_always_on {
+        settings.always_on_microphone = legacy_always_on;
+        changed = true;
+    }
+
+    changed
+}
+
 pub const SETTINGS_STORE_PATH: &str = "settings_store.json";
 
 pub fn get_default_settings() -> AppSettings {
@@ -965,6 +1007,7 @@ pub fn get_default_settings() -> AppSettings {
         update_checks_enabled: default_update_checks_enabled(),
         selected_model: "".to_string(),
         always_on_microphone: false,
+        mic_warm_mode: default_mic_warm_mode(),
         selected_microphone: None,
         clamshell_microphone: None,
         selected_output_device: None,
@@ -1081,6 +1124,7 @@ pub fn load_or_create_app_settings(app: &AppHandle) -> AppSettings {
     let mut updated = false;
     updated |= ensure_post_process_defaults(&mut settings);
     updated |= ensure_cloud_stt_defaults(&mut settings);
+    updated |= ensure_mic_warm_mode_defaults(&mut settings);
     if updated {
         store.set("settings", serde_json::to_value(&settings).unwrap());
     }
@@ -1108,6 +1152,7 @@ pub fn get_settings(app: &AppHandle) -> AppSettings {
     let mut updated = false;
     updated |= ensure_post_process_defaults(&mut settings);
     updated |= ensure_cloud_stt_defaults(&mut settings);
+    updated |= ensure_mic_warm_mode_defaults(&mut settings);
     if updated {
         store.set("settings", serde_json::to_value(&settings).unwrap());
     }
@@ -1176,5 +1221,16 @@ mod tests {
             Some("wss://api.deepgram.com/v1/listen")
         );
         assert_eq!(settings.cloud_stt_finalize_timeout_seconds, 5);
+    }
+
+    #[test]
+    fn always_on_microphone_migrates_to_always_warm_mode() {
+        let mut settings = get_default_settings();
+        settings.always_on_microphone = true;
+        settings.mic_warm_mode = MicWarmMode::Off;
+
+        assert!(ensure_mic_warm_mode_defaults(&mut settings));
+        assert_eq!(settings.mic_warm_mode, MicWarmMode::Always);
+        assert!(settings.always_on_microphone);
     }
 }

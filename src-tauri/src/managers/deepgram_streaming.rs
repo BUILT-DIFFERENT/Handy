@@ -7,7 +7,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::async_runtime::spawn;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
@@ -125,6 +125,7 @@ struct DeepgramErrorMessage {
 #[derive(Clone)]
 struct SessionHandle {
     tx: mpsc::UnboundedSender<SessionCommand>,
+    fingerprint: String,
 }
 
 #[derive(Clone, Default)]
@@ -137,8 +138,12 @@ impl DeepgramStreamingManager {
         Self::default()
     }
 
-    pub fn start_session(&self, settings: AppSettings) -> Result<(), DeepgramStreamingError> {
+    pub fn ensure_preconnected(
+        &self,
+        settings: AppSettings,
+    ) -> Result<(), DeepgramStreamingError> {
         if settings.transcription_backend != TranscriptionBackend::DeepgramStreaming {
+            self.cancel_session();
             return Ok(());
         }
         if settings.translate_to_english {
@@ -146,7 +151,13 @@ impl DeepgramStreamingManager {
                 "Deepgram streaming does not support translate-to-English mode.".to_string(),
             ));
         }
-
+        let fingerprint = session_fingerprint(&settings);
+        if let Some(session) = self.current_session.lock().unwrap().clone() {
+            if session.fingerprint == fingerprint {
+                debug!("Deepgram preconnect cache hit");
+                return Ok(());
+            }
+        }
         self.cancel_session();
 
         let provider_id = cloud_provider_for_backend(settings.transcription_backend)
@@ -163,7 +174,7 @@ impl DeepgramStreamingManager {
         }
 
         let (tx, rx) = mpsc::unbounded_channel();
-        *self.current_session.lock().unwrap() = Some(SessionHandle { tx });
+        *self.current_session.lock().unwrap() = Some(SessionHandle { tx, fingerprint });
         spawn(run_session(settings, api_key, rx));
         Ok(())
     }
@@ -237,9 +248,14 @@ async fn run_session_inner(
     cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
 ) -> Result<(), DeepgramStreamingError> {
     let request = build_request(&settings, &api_key)?;
+    let connect_start = Instant::now();
     let (stream, _) = connect_async(request)
         .await
         .map_err(classify_connect_error)?;
+    debug!(
+        "Deepgram WebSocket connected in {:?}",
+        connect_start.elapsed()
+    );
 
     let (mut sink, mut stream_rx) = stream.split();
     let mut transcript = TranscriptAccumulator::default();
@@ -413,6 +429,26 @@ fn normalize_language(language: &str) -> Option<String> {
         return Some("zh".to_string());
     }
     Some(language.to_string())
+}
+
+fn session_fingerprint(settings: &AppSettings) -> String {
+    let provider_id = cloud_provider_for_backend(settings.transcription_backend)
+        .unwrap_or(CLOUD_STT_DEEPGRAM_PROVIDER_ID);
+    format!(
+        "{}|{}|{}|{}",
+        provider_id,
+        settings
+            .cloud_stt_models
+            .get(provider_id)
+            .map(String::as_str)
+            .unwrap_or_default(),
+        settings
+            .cloud_stt_base_url
+            .get(provider_id)
+            .map(String::as_str)
+            .unwrap_or_default(),
+        normalize_language(&settings.selected_language).unwrap_or_else(|| "auto".to_string())
+    )
 }
 
 fn encode_pcm16(samples: &[f32]) -> Vec<u8> {

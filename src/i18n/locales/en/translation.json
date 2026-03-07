@@ -480,9 +480,14 @@
         "months3": "After 3 months",
         "placeholder": "Select retention period..."
       },
-      "alwaysOnMicrophone": {
-        "label": "Always-On Microphone",
-        "description": "Keep microphone active for faster response"
+      "micWarmMode": {
+        "title": "Microphone Warm Mode",
+        "description": "Choose how aggressively Handy keeps audio capture warm for faster hotkey response.",
+        "options": {
+          "off": "Off",
+          "timed": "Timed Warm",
+          "always": "Always Warm"
+        }
       },
       "clamshellMicrophone": {
         "title": "Clamshell Microphone",

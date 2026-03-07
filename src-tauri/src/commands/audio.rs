@@ -1,7 +1,7 @@
 use crate::audio_feedback;
 use crate::audio_toolkit::audio::{list_input_devices, list_output_devices};
 use crate::managers::audio::{AudioRecordingManager, MicrophoneMode};
-use crate::settings::{get_settings, write_settings};
+use crate::settings::{get_settings, write_settings, MicWarmMode};
 use log::warn;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -45,6 +45,11 @@ pub fn update_microphone_mode(app: AppHandle, always_on: bool) -> Result<(), Str
     // Update settings
     let mut settings = get_settings(&app);
     settings.always_on_microphone = always_on;
+    settings.mic_warm_mode = if always_on {
+        MicWarmMode::Always
+    } else {
+        MicWarmMode::Off
+    };
     write_settings(&app, settings);
 
     // Update the audio manager mode
@@ -57,6 +62,29 @@ pub fn update_microphone_mode(app: AppHandle, always_on: bool) -> Result<(), Str
 
     rm.update_mode(new_mode)
         .map_err(|e| format!("Failed to update microphone mode: {}", e))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_mic_warm_mode_setting(app: AppHandle, mode: MicWarmMode) -> Result<(), String> {
+    let mut settings = get_settings(&app);
+    settings.mic_warm_mode = mode;
+    settings.always_on_microphone = mode == MicWarmMode::Always;
+    write_settings(&app, settings);
+
+    let rm = app.state::<Arc<AudioRecordingManager>>();
+    let runtime_mode = if mode == MicWarmMode::Always {
+        MicrophoneMode::AlwaysOn
+    } else {
+        MicrophoneMode::OnDemand
+    };
+    rm.update_mode(runtime_mode)
+        .map_err(|e| format!("Failed to update mic warm mode: {}", e))?;
+    if mode != MicWarmMode::Off {
+        rm.prewarm_microphone_stream()
+            .map_err(|e| format!("Failed to prewarm microphone stream: {}", e))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

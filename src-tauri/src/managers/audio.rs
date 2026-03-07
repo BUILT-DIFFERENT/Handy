@@ -1,11 +1,16 @@
 use crate::audio_toolkit::{list_input_devices, vad::SmoothedVad, AudioRecorder, SileroVad};
 use crate::helpers::clamshell;
-use crate::settings::{get_settings, AppSettings};
+use crate::settings::{get_settings, AppSettings, MicWarmMode};
 use crate::utils;
+use cpal::traits::HostTrait;
 use log::{debug, error, info};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 use tauri::Manager;
+
+const TIMED_WARM_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn set_mute(mute: bool) {
     // Expected behavior:
@@ -135,6 +140,16 @@ fn create_audio_recorder(
     Ok(recorder)
 }
 
+fn resolve_vad_path(app_handle: &tauri::AppHandle) -> Result<std::path::PathBuf, anyhow::Error> {
+    app_handle
+        .path()
+        .resolve(
+            "resources/models/silero_vad_v4.onnx",
+            tauri::path::BaseDirectory::Resource,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to resolve VAD path: {}", e))
+}
+
 /* ──────────────────────────────────────────────────────────────── */
 
 #[derive(Clone)]
@@ -147,6 +162,8 @@ pub struct AudioRecordingManager {
     is_open: Arc<Mutex<bool>>,
     is_recording: Arc<Mutex<bool>>,
     did_mute: Arc<Mutex<bool>>,
+    warm_close_generation: Arc<AtomicU64>,
+    cached_input_device: Arc<Mutex<Option<(String, cpal::Device)>>>,
 }
 
 impl AudioRecordingManager {
@@ -154,26 +171,29 @@ impl AudioRecordingManager {
 
     pub fn new(app: &tauri::AppHandle) -> Result<Self, anyhow::Error> {
         let settings = get_settings(app);
-        let mode = if settings.always_on_microphone {
+        let mode = if settings.mic_warm_mode == MicWarmMode::Always {
             MicrophoneMode::AlwaysOn
         } else {
             MicrophoneMode::OnDemand
         };
+        let vad_path = resolve_vad_path(app)?;
+        let recorder = create_audio_recorder(vad_path.to_str().unwrap(), app)?;
 
         let manager = Self {
             state: Arc::new(Mutex::new(RecordingState::Idle)),
             mode: Arc::new(Mutex::new(mode.clone())),
             app_handle: app.clone(),
 
-            recorder: Arc::new(Mutex::new(None)),
+            recorder: Arc::new(Mutex::new(Some(recorder))),
             is_open: Arc::new(Mutex::new(false)),
             is_recording: Arc::new(Mutex::new(false)),
             did_mute: Arc::new(Mutex::new(false)),
+            warm_close_generation: Arc::new(AtomicU64::new(0)),
+            cached_input_device: Arc::new(Mutex::new(None)),
         };
 
-        // Always-on?  Open immediately.
-        if matches!(mode, MicrophoneMode::AlwaysOn) {
-            manager.start_microphone_stream()?;
+        if settings.mic_warm_mode != MicWarmMode::Off {
+            manager.prewarm_microphone_stream()?;
         }
 
         Ok(manager)
@@ -181,7 +201,7 @@ impl AudioRecordingManager {
 
     /* ---------- helper methods --------------------------------------------- */
 
-    fn get_effective_microphone_device(&self, settings: &AppSettings) -> Option<cpal::Device> {
+    fn effective_device_key(&self, settings: &AppSettings) -> String {
         // Check if we're in clamshell mode and have a clamshell microphone configured
         let use_clamshell_mic = if let Ok(is_clamshell) = clamshell::is_clamshell() {
             is_clamshell && settings.clamshell_microphone.is_some()
@@ -189,18 +209,58 @@ impl AudioRecordingManager {
             false
         };
 
-        let device_name = if use_clamshell_mic {
-            settings.clamshell_microphone.as_ref().unwrap()
+        if use_clamshell_mic {
+            settings.clamshell_microphone.as_ref().unwrap().clone()
         } else {
-            settings.selected_microphone.as_ref()?
-        };
+            settings
+                .selected_microphone
+                .clone()
+                .unwrap_or_else(|| "default".to_string())
+        }
+    }
+
+    fn get_effective_microphone_device(&self, settings: &AppSettings) -> Option<cpal::Device> {
+        let cache_key = self.effective_device_key(settings);
+
+        if let Some((cached_key, cached_device)) = self.cached_input_device.lock().unwrap().clone() {
+            if cached_key == cache_key {
+                debug!("Audio device cache hit for '{}'", cache_key);
+                return Some(cached_device);
+            }
+        }
+
+        if cache_key == "default" {
+            let start = Instant::now();
+            let default_device = crate::audio_toolkit::get_cpal_host().default_input_device();
+            if let Some(device) = default_device.clone() {
+                debug!("Resolved default microphone in {:?}", start.elapsed());
+                self.cached_input_device
+                    .lock()
+                    .unwrap()
+                    .replace((cache_key, device));
+            }
+            return default_device;
+        }
+
+        let lookup_start = Instant::now();
 
         // Find the device by name
         match list_input_devices() {
             Ok(devices) => devices
                 .into_iter()
-                .find(|d| d.name == *device_name)
-                .map(|d| d.device),
+                .find(|d| d.name == cache_key)
+                .map(|d| {
+                    debug!(
+                        "Resolved microphone '{}' in {:?}",
+                        cache_key,
+                        lookup_start.elapsed()
+                    );
+                    self.cached_input_device
+                        .lock()
+                        .unwrap()
+                        .replace((cache_key, d.device.clone()));
+                    d.device
+                }),
             Err(e) => {
                 debug!("Failed to list devices, using default: {}", e);
                 None
@@ -239,23 +299,18 @@ impl AudioRecordingManager {
             return Ok(());
         }
 
+        self.cancel_pending_warm_close();
+
         let start_time = Instant::now();
 
         // Don't mute immediately - caller will handle muting after audio feedback
         let mut did_mute_guard = self.did_mute.lock().unwrap();
         *did_mute_guard = false;
 
-        let vad_path = self
-            .app_handle
-            .path()
-            .resolve(
-                "resources/models/silero_vad_v4.onnx",
-                tauri::path::BaseDirectory::Resource,
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to resolve VAD path: {}", e))?;
         let mut recorder_opt = self.recorder.lock().unwrap();
 
         if recorder_opt.is_none() {
+            let vad_path = resolve_vad_path(&self.app_handle)?;
             *recorder_opt = Some(create_audio_recorder(
                 vad_path.to_str().unwrap(),
                 &self.app_handle,
@@ -305,7 +360,24 @@ impl AudioRecordingManager {
     }
 
     pub fn prewarm_microphone_stream(&self) -> Result<(), anyhow::Error> {
-        self.start_microphone_stream()
+        let warm_mode = get_settings(&self.app_handle).mic_warm_mode;
+        if warm_mode == MicWarmMode::Off {
+            return Ok(());
+        }
+
+        let start = Instant::now();
+        self.start_microphone_stream()?;
+        debug!(
+            "Microphone prewarm completed in {:?} with mode {:?}",
+            start.elapsed(),
+            warm_mode
+        );
+
+        if warm_mode == MicWarmMode::Timed {
+            self.schedule_timed_warm_close();
+        }
+
+        Ok(())
     }
 
     /* ---------- mode switching --------------------------------------------- */
@@ -313,9 +385,20 @@ impl AudioRecordingManager {
     pub fn update_mode(&self, new_mode: MicrophoneMode) -> Result<(), anyhow::Error> {
         let mode_guard = self.mode.lock().unwrap();
         let cur_mode = mode_guard.clone();
+        let warm_mode = get_settings(&self.app_handle).mic_warm_mode;
 
         match (cur_mode, &new_mode) {
-            (MicrophoneMode::AlwaysOn, MicrophoneMode::OnDemand) => {}
+            (MicrophoneMode::AlwaysOn, MicrophoneMode::OnDemand) => {
+                if warm_mode == MicWarmMode::Off
+                    && matches!(*self.state.lock().unwrap(), RecordingState::Idle)
+                {
+                    drop(mode_guard);
+                    self.stop_microphone_stream();
+                } else if warm_mode == MicWarmMode::Timed {
+                    drop(mode_guard);
+                    self.schedule_timed_warm_close();
+                }
+            }
             (MicrophoneMode::OnDemand, MicrophoneMode::AlwaysOn) => {
                 drop(mode_guard);
                 self.start_microphone_stream()?;
@@ -333,6 +416,7 @@ impl AudioRecordingManager {
         let mut state = self.state.lock().unwrap();
 
         if let RecordingState::Idle = *state {
+            self.cancel_pending_warm_close();
             // Ensure microphone is open in on-demand mode
             if matches!(*self.mode.lock().unwrap(), MicrophoneMode::OnDemand) {
                 if let Err(e) = self.start_microphone_stream() {
@@ -359,6 +443,7 @@ impl AudioRecordingManager {
     }
 
     pub fn update_selected_device(&self) -> Result<(), anyhow::Error> {
+        self.cached_input_device.lock().unwrap().take();
         // If currently open, restart the microphone stream to use the new device
         if *self.is_open.lock().unwrap() {
             self.stop_microphone_stream();
@@ -407,6 +492,7 @@ impl AudioRecordingManager {
 
                 *self.is_recording.lock().unwrap() = false;
                 self.clear_processed_frame_callback();
+                self.handle_post_recording_warm_mode();
 
                 Some(samples)
             }
@@ -434,6 +520,40 @@ impl AudioRecordingManager {
 
             *self.is_recording.lock().unwrap() = false;
             self.clear_processed_frame_callback();
+            self.handle_post_recording_warm_mode();
         }
+    }
+
+    fn handle_post_recording_warm_mode(&self) {
+        match get_settings(&self.app_handle).mic_warm_mode {
+            MicWarmMode::Off => self.stop_microphone_stream(),
+            MicWarmMode::Timed => self.schedule_timed_warm_close(),
+            MicWarmMode::Always => {}
+        }
+    }
+
+    fn cancel_pending_warm_close(&self) {
+        self.warm_close_generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn schedule_timed_warm_close(&self) {
+        self.cancel_pending_warm_close();
+        let generation = self.warm_close_generation.load(Ordering::Relaxed);
+        let manager = self.clone();
+        thread::spawn(move || {
+            thread::sleep(TIMED_WARM_TIMEOUT);
+            if manager.warm_close_generation.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            if manager.is_recording() {
+                return;
+            }
+
+            debug!(
+                "Timed mic warm window expired after {:?}; closing microphone stream",
+                TIMED_WARM_TIMEOUT
+            );
+            manager.stop_microphone_stream();
+        });
     }
 }

@@ -443,7 +443,7 @@ impl ShortcutAction for TranscribeAction {
                 }
             });
 
-            if let Err(err) = deepgram_manager.start_session(settings.clone()) {
+            if let Err(err) = deepgram_manager.ensure_preconnected(settings.clone()) {
                 rm.clear_processed_frame_callback();
                 if settings.cloud_stt_fallback_to_local {
                     warn!(

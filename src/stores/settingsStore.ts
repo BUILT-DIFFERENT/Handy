@@ -85,6 +85,8 @@ const settingUpdaters: {
 } = {
   always_on_microphone: (value) =>
     commands.updateMicrophoneMode(value as boolean),
+  mic_warm_mode: (value) =>
+    commands.changeMicWarmModeSetting(value as any),
   audio_feedback: (value) =>
     commands.changeAudioFeedbackSetting(value as boolean),
   audio_feedback_volume: (value) =>
@@ -220,6 +222,9 @@ export const useSettingsStore = create<SettingsStore>()(
           const normalizedSettings: Settings = {
             ...settings,
             always_on_microphone: settings.always_on_microphone ?? false,
+            mic_warm_mode:
+              settings.mic_warm_mode ??
+              (settings.always_on_microphone ? "always" : "off"),
             selected_microphone: settings.selected_microphone ?? "Default",
             clamshell_microphone: settings.clamshell_microphone ?? "Default",
             selected_output_device:

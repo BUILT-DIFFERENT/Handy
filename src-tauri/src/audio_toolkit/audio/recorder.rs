@@ -1,7 +1,7 @@
 use std::{
     io::Error,
     sync::{mpsc, Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use cpal::{
@@ -31,6 +31,7 @@ pub struct AudioRecorder {
     vad: Option<Arc<Mutex<Box<dyn vad::VoiceActivityDetector>>>>,
     level_cb: Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
     processed_frame_cb: Arc<Mutex<Option<ProcessedFrameCallback>>>,
+    cached_config: Arc<Mutex<Option<(String, cpal::SupportedStreamConfig)>>>,
 }
 
 impl AudioRecorder {
@@ -42,6 +43,7 @@ impl AudioRecorder {
             vad: None,
             level_cb: None,
             processed_frame_cb: Arc::new(Mutex::new(None)),
+            cached_config: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -62,6 +64,7 @@ impl AudioRecorder {
         if self.worker_handle.is_some() {
             return Ok(()); // already open
         }
+        let open_start = Instant::now();
 
         let (sample_tx, sample_rx) = mpsc::channel::<Vec<f32>>();
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
@@ -73,16 +76,27 @@ impl AudioRecorder {
                 .default_input_device()
                 .ok_or_else(|| Error::new(std::io::ErrorKind::NotFound, "No input device found"))?,
         };
+        let device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
+        let config_start = Instant::now();
+        let config = self.get_or_cache_preferred_config(&device, &device_name)?;
+        log::info!(
+            "AudioRecorder::open prepared device '{}' in {:?} (config phase {:?})",
+            device_name,
+            open_start.elapsed(),
+            config_start.elapsed()
+        );
 
         let thread_device = device.clone();
+        let thread_device_name = device_name.clone();
         let vad = self.vad.clone();
         // Move the optional level callback into the worker thread
         let level_cb = self.level_cb.clone();
         let processed_frame_cb = self.processed_frame_cb.clone();
+        let thread_config = config.clone();
 
         let worker = std::thread::spawn(move || {
-            let config = AudioRecorder::get_preferred_config(&thread_device)
-                .expect("failed to fetch preferred config");
+            let worker_open_start = Instant::now();
+            let config = thread_config;
 
             let sample_rate = config.sample_rate().0;
             let channels = config.channels() as usize;
@@ -95,6 +109,7 @@ impl AudioRecorder {
                 config.sample_format()
             );
 
+            let build_start = Instant::now();
             let stream = match config.sample_format() {
                 cpal::SampleFormat::U8 => {
                     AudioRecorder::build_stream::<u8>(&thread_device, &config, sample_tx, channels)
@@ -118,8 +133,20 @@ impl AudioRecorder {
                 }
                 _ => panic!("unsupported sample format"),
             };
+            log::debug!(
+                "AudioRecorder built input stream for '{}' in {:?}",
+                thread_device_name,
+                build_start.elapsed()
+            );
 
+            let play_start = Instant::now();
             stream.play().expect("failed to start stream");
+            log::debug!(
+                "AudioRecorder started stream playback for '{}' in {:?} (worker total {:?})",
+                thread_device_name,
+                play_start.elapsed(),
+                worker_open_start.elapsed()
+            );
 
             // keep the stream alive while we process samples
             run_consumer(
@@ -175,6 +202,32 @@ impl AudioRecorder {
 
     pub fn clear_processed_frame_callback(&self) {
         *self.processed_frame_cb.lock().unwrap() = None;
+    }
+
+    fn get_or_cache_preferred_config(
+        &self,
+        device: &cpal::Device,
+        device_name: &str,
+    ) -> Result<cpal::SupportedStreamConfig, Box<dyn std::error::Error>> {
+        if let Some((cached_device, cached_config)) = self.cached_config.lock().unwrap().clone() {
+            if cached_device == device_name {
+                log::debug!("Audio config cache hit for '{}'", device_name);
+                return Ok(cached_config);
+            }
+        }
+
+        let start = Instant::now();
+        let config = AudioRecorder::get_preferred_config(device)?;
+        log::debug!(
+            "Audio config cache miss for '{}'; negotiated in {:?}",
+            device_name,
+            start.elapsed()
+        );
+        self.cached_config
+            .lock()
+            .unwrap()
+            .replace((device_name.to_string(), config.clone()));
+        Ok(config)
     }
 
     fn build_stream<T>(
